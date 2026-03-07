@@ -145,9 +145,11 @@ In `labs/submission5.md`, document:
    docker run --rm --network host \
      -v "$(pwd)/labs/lab5":/zap/wrk/:rw \
      zaproxy/zap-stable:latest \
-     zap.sh -cmd \
+     zap.sh -cmd -port 8090 \
       -autorun /zap/wrk/scripts/zap-auth.yaml
    ```
+
+   > **Note:** `-port 8090` avoids conflicts with other services on port 8080 (ZAP's default).
 
    <details>
    <summary>📝 ZAP Configuration Explained</summary>
