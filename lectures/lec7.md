@@ -1,1615 +1,441 @@
-# 📌Lecture 7 - Container & Kubernetes Security: Docker/K8s Fundamentals, Image Scanning, RBAC & Runtime Protection
+# 📌 Lecture 7 — Container & Kubernetes Security: Scanning the Artifact, Hardening the Cluster
 
-## 📂 Group 1: Container Fundamentals & Security Basics
+---
 
-## 📍 Slide 1 – 🐳 Container Technology Overview & Evolution
+## 📍 Slide 1 – 🪅 The 1.6 Million Cryptominer Containers
 
-* 🐳 **Container** = lightweight, portable execution environment that packages application + dependencies
-* 🕰️ **Evolution timeline:**
-  * 📅 **1979**: Unix chroot → first process isolation concept
-  * 📅 **2000**: FreeBSD Jails → early container-like technology
-  * 📅 **2008**: LXC (Linux Containers) → Linux namespace + cgroups integration
-  * 📅 **2013**: Docker released → revolutionized container adoption
-  * 📅 **2014**: Kubernetes released by Google → container orchestration at scale
-  * 📅 **2017**: containerd donated to CNCF (Cloud Native Computing Foundation)
-* 📊 **Adoption stats**: 87% of organizations use containers in production (Red Hat State of Enterprise Open Source 2024)
-* 🏢 **Industry impact**: Netflix runs 300,000+ containers, Uber deploys 1,000+ times per day
-* 🔗 **Learn more:** [Docker Overview](https://docs.docker.com/get-started/overview/), [Container History](https://blog.aquasec.com/a-brief-history-of-containers-from-1970s-chroot-to-docker-2016)
+* 🗓️ **August 2018 onward** — Aqua Security's research team begins tracking misconfigured Docker daemons and exposed Kubernetes API servers
+* 🪙 By 2023 they had documented **>1.6 million** publicly accessible containers running cryptominers; the average compromise lifecycle: **15 minutes from misconfig to miner**
+* 🎯 The pattern: a developer exposes `2375/tcp` on a cloud VM "just for debugging", or a fresh K8s cluster ships with `kubectl proxy` reachable; scanner bots find it in minutes; miners deploy by the thousand
+* 🧠 Every one of these is a **misconfiguration finding** that Trivy + a Pod Security Standard policy would have flagged — the rules existed; they weren't gating
+
+> 🤔 **Think:** Lecture 6 scanned the IaC text that *creates* the cluster. This lecture scans the *image* you run inside it and the *cluster config* it lives in. Three layers of static checks before any code runs.
+
+---
+
+## 📍 Slide 2 – 🎯 Learning Outcomes
+
+| # | 🎓 Outcome |
+|---|-----------|
+| 1 | ✅ Write a **secure Dockerfile** (non-root, minimal base, no embedded secrets) |
+| 2 | ✅ Run **Trivy** image scan and read its CVE + misconfig output |
+| 3 | ✅ Apply **Pod Security Standards** (Privileged / Baseline / Restricted) to a namespace |
+| 4 | ✅ Choose between distroless, Alpine, and full-distro base images by use case |
+| 5 | ✅ Identify the three Kubernetes objects that most often grant excessive privilege (Role/ClusterRole, ServiceAccount, NetworkPolicy gaps) |
+
+---
+
+## 📍 Slide 3 – 🗺️ Where Lecture 7 Sits
 
 ```mermaid
-flowchart LR
-    BM[🖥️ Bare Metal<br/>1970s-1990s] --> VM[🏠 Virtual Machines<br/>2000s]
-    VM --> Container[📦 Containers<br/>2010s+]
-    
-    subgraph "🏠 VM Characteristics"
-        VM1[🔧 Full OS per VM]
-        VM2[💾 High Resource Usage]
-        VM3[⏱️ Slow Boot Time]
-    end
-    
-    subgraph "📦 Container Benefits"
-        C1[⚡ Shared OS Kernel]
-        C2[💨 Lightweight]
-        C3[🚀 Fast Startup]
-    end
-    
-    style BM fill:#fdf2e9,stroke:#e67e22,stroke-width:2px,color:#2c3e50
-    style VM fill:#eaf2f8,stroke:#3498db,stroke-width:2px,color:#2c3e50
-    style Container fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
+graph LR
+    L4["🚀 L4 SBOM/SCA"] --> L7
+    L5["🧪 L5 SAST/DAST"] --> L7
+    L6["🏗️ L6 IaC scan"] --> L7["📦 L7 Container<br/>(here)"]
+    L7 --> L8["🔏 L8 Sign<br/>+ verify"]
+    L7 -.feeds.-> L9["📊 L9 Runtime<br/>Falco"]
+
+    style L7 fill:#FF9800,color:#fff
 ```
+
+* 🪜 **Building on prior labs:**
+  * L4 generated the SBOM — we'll scan its CVEs here
+  * L6 scanned the IaC that creates clusters — we now scan the **images** running inside them
+* 🎯 **Lab 7 alignment:** Task 1 (Trivy image scan on Juice Shop + Docker Bench), Task 2 (K8s hardening via PSS), Bonus (small Policy-as-Code gate for insecure pods)
+* 🛣️ **Setting up L8:** the image we harden here will be signed in Lab 8; runtime behavior monitored in Lab 9
 
 ---
 
-### 🆚 Container vs Virtual Machine Comparison
+## 📍 Slide 4 – 🐳 What's Actually in a Container
 
-| Aspect | 🏠 Virtual Machines | 📦 Containers |
-|--------|-------------------|---------------|
-| 🔧 **Architecture** | Full OS + Hypervisor | Shared OS kernel |
-| 💾 **Resource Usage** | High (GB per VM) | Low (MB per container) |
-| ⏱️ **Startup Time** | Minutes | Seconds |
-| 🔒 **Isolation** | Hardware-level | Process-level |
-| 📦 **Portability** | Limited | Excellent |
-| 🛡️ **Security** | Stronger isolation | Weaker isolation |
-| 💰 **Cost** | Higher | Lower |
-
-### 🛠️ Container Runtime Ecosystem
-
-* 🐳 **Docker** = most popular, full container platform (daemon + CLI + registry)
-* 🏗️ **containerd** = industry-standard container runtime (Docker's core engine)
-* 🔧 **CRI-O** = Kubernetes-focused, OCI (Open Container Initiative) compliant
-* 🔒 **Podman** = daemonless, rootless containers by Red Hat
-* ⚡ **runc** = low-level container runtime (spawns/runs containers)
-* 📊 **Market share**: Docker 83%, containerd 17% (Datadog Container Report 2024)
+> 💬 *"A container is just a Linux process with a particularly fancy set of namespaces and cgroups."* — Liz Rice, *Container Security* (O'Reilly, 2020)
 
 ```mermaid
-flowchart LR
-    App[📱 Application] --> Engine[🚂 Container Engine]
-    Engine --> Runtime[⚙️ Container Runtime]
-    Runtime --> Kernel[🐧 Linux Kernel]
-    
-    subgraph "🚂 Container Engines"
-        Docker[🐳 Docker]
-        Podman[🔒 Podman]
-    end
-    
-    subgraph "⚙️ Container Runtimes"
-        containerd[🏗️ containerd]
-        CRIO[🔧 CRI-O]
-        runc[⚡ runc]
-    end
-    
-    style App fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#2c3e50
-    style Kernel fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#2c3e50
+graph TB
+    Container[🐳 Container] --> NS[Linux namespaces<br/>PID, NET, MNT, UTS, IPC, USER]
+    Container --> CG[cgroups<br/>CPU, memory, devices]
+    Container --> RFS[Layered filesystem<br/>OverlayFS]
+    Container --> CAPS[Linux capabilities<br/>retained subset of root]
+
+    style Container fill:#2196F3,color:#fff
 ```
 
-<details>
-<summary>💭 <strong>Interactive Question:</strong> Why would you choose Podman over Docker?</summary>
-
-**Podman advantages:**
-* 🔒 **Daemonless** → no privileged daemon running
-* 👤 **Rootless** → runs containers without root privileges
-* 🔐 **More secure** → smaller attack surface
-* 📦 **OCI compliant** → better standards compliance
-* 🏢 **Enterprise focus** → Red Hat/IBM enterprise support
-
-**Docker advantages:**
-* 🌍 **Ecosystem** → larger community, more tutorials
-* 🛠️ **Docker Compose** → easier multi-container apps
-* 📚 **Documentation** → more learning resources
-* 🔄 **Docker Hub** → largest container registry
-
-**Bottom line:** Podman for security-conscious enterprises, Docker for development ease
-</details>
+* 🪜 A container is **not** a VM. It shares the kernel with the host. **Kernel CVE = container escape risk** (see Dirty Pipe CVE-2022-0847, runc CVE-2024-21626)
+* 🧠 The image is just a **tarball of filesystem layers**. Scanning the image = scanning those layer tarballs for known-CVE packages + secrets + misconfig
+* 🪜 **Pictographic mental model:** image = recipe; container = cooked meal; runtime = stove. Each has different vulnerabilities
 
 ---
 
-## 📍 Slide 2 – 🏗️ Docker Architecture & Security Model
+## 📍 Slide 5 – 🔥 Where Container Bugs Come From
 
-* 🏗️ **Docker Architecture Components:**
-  * 🖥️ **Docker Daemon (dockerd)** = background service managing containers
-  * 💻 **Docker CLI** = command-line interface for user interactions
-  * 🌐 **Docker API** = RESTful API for programmatic control
-  * 📦 **Docker Registry** = stores and distributes container images
-* 🔒 **Container Isolation Mechanisms:**
-  * 🏠 **Namespaces** = isolate process views (PID, network, filesystem, user)
-  * ⚖️ **Control Groups (cgroups)** = limit resource usage (CPU, memory, I/O)
-  * 🛡️ **Seccomp** = restricts system calls available to processes
-  * 🔐 **AppArmor/SELinux** = mandatory access control policies
-* ⚠️ **Critical security concern**: Docker daemon runs as root → potential privilege escalation
-* 📊 **Default Docker setup** = containers can access host resources if misconfigured
+| 🚨 Class | 💥 Example | 🪜 Layer to fix |
+|---|---|---|
+| **Vulnerable base image** | Alpine with patched glibc CVE | Update / rebuild |
+| **Vulnerable app deps** | Log4j 2 in your Java image (Lecture 1) | SBOM + SCA (L4) |
+| **Embedded secrets** | Build arg `ARG DB_PASSWORD=...` baked into a layer | gitleaks + Trivy secrets |
+| **Excessive privileges** | `USER root`, no `--cap-drop` | Dockerfile + runtime flags |
+| **Insecure runtime** | `--privileged`, host PID, host network | K8s SecurityContext / PSS |
+| **Kernel CVE** | runc/containerd escape | OS patch cadence |
 
-```mermaid
-flowchart LR
-    CLI[💻 Docker CLI] --> Daemon[🖥️ Docker Daemon]
-    Daemon --> Images[📦 Images]
-    Daemon --> Containers[🏃‍♂️ Running Containers]
-    Daemon --> Registry[🌐 Docker Registry]
-    
-    subgraph "🔒 Isolation Layers"
-        NS[🏠 Namespaces]
-        CG[⚖️ cgroups]
-        SC[🛡️ seccomp]
-        MAC[🔐 AppArmor/SELinux]
-    end
-    
-    Containers --> NS
-    Containers --> CG
-    Containers --> SC
-    Containers --> MAC
-    
-    style Daemon fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-    style NS fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-```
+* 🪜 Most of these layers are **scannable** — Trivy hits all of them in one pass
+* 🧠 **The runtime classes (privileged, host PID)** are NOT scannable on the image — they live in your **K8s manifest** or `docker run` flags. That's where Lab 7 Task 2 lives
 
 ---
 
-### 🔓 Container Security Risks & Attack Vectors
-
-* 🚪 **Container Escape** = breaking out of container to access host system
-  * 🔑 Common causes: privileged containers, mounted host directories, kernel vulnerabilities
-  * 📊 **CVE-2019-5736** (runc escape) affected millions of containers worldwide
-* ⚠️ **Docker Daemon Vulnerabilities:**
-  * 🌐 Exposed Docker API (port 2375/2376) → remote code execution
-  * 🔓 Insecure Docker socket access (`/var/run/docker.sock`)
-  * 👑 Docker daemon runs as root → full host compromise possible
-* 📦 **Image-Based Attacks:**
-  * 🐛 Vulnerable base images with known CVEs
-  * 🔑 Secrets embedded in image layers
-  * 🦠 Malicious images from untrusted registries
-* 🌐 **Network Security Issues:**
-  * 📡 Default bridge network → containers can communicate freely
-  * 🔓 Exposed container ports → unintended external access
-
-<details>
-<summary>💭 <strong>Security Challenge:</strong> What makes the first command dangerous?</summary>
-
-**Multiple dangerous flags:**
-
-1. **`--privileged`** 🔓
-   - Disables all security restrictions
-   - Gives container full access to host devices
-   - Can modify kernel parameters
-
-2. **`-v /:/host`** 📁
-   - Mounts entire host filesystem
-   - Container can read/write ANY host file
-   - Includes `/etc/passwd`, `/etc/shadow`, etc.
-
-3. **Running as root (default)** 👑
-   - Container processes run with root privileges
-   - No user namespace isolation
-
-**Result:** Complete host compromise in one command!
-
-**Real-world impact:** This exact pattern caused the 2018 Tesla Kubernetes compromise.
-</details>
-
----
-
-## 📍 Slide 3 – 📦 Container Images & Layered Filesystem
-
-* 📦 **Container Image** = read-only template containing application code + runtime + libraries + dependencies
-* 🧅 **Layered Architecture:**
-  * 🏗️ **Base layer** = operating system foundation (e.g., ubuntu:20.04)
-  * 📚 **Library layers** = runtime dependencies, frameworks
-  * 📱 **Application layer** = your code and configurations
-  * 🔝 **Writable layer** = created when container runs (ephemeral)
-* 🏭 **Image Registries:**
-  * 🌍 **Docker Hub** = public registry (10B+ image pulls monthly)
-  * ☁️ **Amazon ECR** = AWS-managed private registry
-  * ☁️ **Google GCR** = Google Cloud container registry  
-  * 🏢 **Harbor** = open-source enterprise registry with security scanning
-* 🔐 **Docker Content Trust (DCT)** = image signing and verification using Notary
-* 📊 **Security stats**: 51% of container images contain high-severity vulnerabilities (Snyk Container Security Report 2024)
-
-```mermaid
-flowchart TB
-    subgraph "📦 Container Image Layers"
-        App[📱 Application Layer<br/>Your Code]
-        Deps[📚 Dependencies Layer<br/>Libraries, Frameworks]  
-        Runtime[⚙️ Runtime Layer<br/>JVM, Node.js, Python]
-        Base[🏗️ Base OS Layer<br/>Ubuntu, Alpine, Distroless]
-    end
-    
-    subgraph "🏃‍♂️ Running Container"
-        Writable[✍️ Writable Layer<br/>Temporary Changes]
-        App --> Writable
-    end
-    
-    subgraph "🌐 Registries"
-        Hub[🌍 Docker Hub<br/>Public Images]
-        ECR[☁️ AWS ECR<br/>Private Registry]
-        Harbor[🏢 Harbor<br/>Enterprise Registry]
-    end
-    
-    Base --> Runtime
-    Runtime --> Deps  
-    Deps --> App
-    
-    style App fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#2c3e50
-    style Base fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#2c3e50
-    style Writable fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#2c3e50
-```
-
----
-
-### 🔒 Image Security Best Practices
-
-* 🏔️ **Use Minimal Base Images:**
-  * 🐧 **Alpine Linux** = 5MB base image vs Ubuntu's 64MB
-  * 🛡️ **Distroless** = no shell, package manager → smaller attack surface
-  * 📦 **Scratch** = empty base image for static binaries
-* 🚫 **Avoid Root User:**
-  ```dockerfile
-  # ❌ BAD: Running as root (default)
-  FROM ubuntu:20.04
-  COPY app /app
-  CMD ["/app"]
-  
-  # ✅ GOOD: Create and use non-root user
-  FROM ubuntu:20.04
-  RUN groupadd -r appuser && useradd -r -g appuser appuser
-  COPY app /app
-  RUN chown -R appuser:appuser /app
-  USER appuser
-  CMD ["/app"]
-  ```
-* 🔐 **Multi-stage Builds** = separate build and runtime environments
-
-### 📊 Base Image Comparison
-
-| Base Image | Size | Packages | Use Case | Security |
-|------------|------|----------|----------|----------|
-| 🐧 **ubuntu:20.04** | 64MB | ~100 | Development | ⚠️ Medium |
-| 🏔️ **alpine:latest** | 5MB | ~15 | Production | ✅ Good |
-| 🛡️ **distroless** | 2-20MB | 0-5 | Production | 🏆 Excellent |
-| 📦 **scratch** | 0MB | 0 | Static binaries | 🏆 Maximum |
-
-<details>
-<summary>💭 <strong>Quick Poll:</strong> Which base image would you choose for a Python web app?</summary>
-
-**Options:**
-1. 🐧 `python:3.11` (900MB)
-2. 🏔️ `python:3.11-alpine` (50MB)  
-3. 🛡️ `python:3.11-slim` (120MB)
-4. 📦 Custom distroless + Python
-
-**Best practices:**
-- **Development:** python:3.11 (easier debugging)
-- **Production:** python:3.11-alpine or distroless (security + size)
-- **High security:** Custom distroless build
-- **CI/CD:** python:3.11-slim (balance of features + size)
-
-**Pro tip:** Start with slim, move to alpine/distroless as you mature your security practices!
-</details>
-
----
-
-## 📍 Slide 4 – 🔍 Container Image Security Scanning
-
-* 🔍 **Vulnerability Scanning** = automated analysis of container images for known security vulnerabilities
-* 🎯 **What scanners detect:**
-  * 🐛 **OS package vulnerabilities** = CVEs in base image packages (apt, yum packages)
-  * 📚 **Application dependencies** = vulnerable libraries (npm, pip, maven packages)  
-  * 🔑 **Embedded secrets** = API keys, passwords, certificates in image layers
-  * ⚙️ **Misconfigurations** = running as root, exposed ports, insecure defaults
-* 🛠️ **Popular Scanning Tools:**
-  * ⚡ **Trivy** = comprehensive, fast, supports multiple languages
-  * 🦅 **Grype** = by Anchore, excellent vulnerability database
-  * 🐍 **Snyk** = commercial, great developer experience
-  * 🔍 **Clair** = open-source, API-first, used by Red Hat Quay
-* 📊 **Scanning integration**: 78% of organizations scan images in CI/CD pipelines (CNCF Survey 2024)
-
-```mermaid
-flowchart LR
-    Image[📦 Container Image] --> Scanner[🔍 Security Scanner]
-    Scanner --> DB[(🗃️ Vulnerability Database<br/>NVD, GitHub, OS vendors)]
-    Scanner --> Results[📋 Scan Results]
-    
-    subgraph "📋 Vulnerability Report"
-        Critical[🔴 Critical: 5]
-        High[🟠 High: 12] 
-        Medium[🟡 Medium: 23]
-        Low[🟢 Low: 8]
-    end
-    
-    Results --> Critical
-    Results --> High
-    Results --> Medium
-    Results --> Low
-    
-    subgraph "🛠️ Popular Tools"
-        Trivy[⚡ Trivy]
-        Grype[🦅 Grype]
-        Snyk[🐍 Snyk]
-        Clair[🔍 Clair]
-    end
-    
-    style Critical fill:#ffebee,stroke:#d32f2f,stroke-width:3px,color:#2c3e50
-    style High fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#2c3e50
-```
-
----
-
-### 🔧 Scanner Comparison Matrix
-
-| Tool | 💰 Cost | ⚡ Speed | 📊 Accuracy | 🌍 Languages | 🏢 Enterprise |
-|------|---------|----------|-------------|--------------|--------------|
-| ⚡ **Trivy** | Free | Fast | High | 20+ | Good |
-| 🦅 **Grype** | Free | Fast | High | 15+ | Good |
-| 🐍 **Snyk** | Freemium | Fast | Very High | 25+ | Excellent |
-| 🔍 **Clair** | Free | Medium | High | 10+ | Good |
-| 📊 **JFrog Xray** | Paid | Fast | Very High | 20+ | Excellent |
-
-### 📈 Vulnerability Severity Levels (CVSS)
-
-| Score | Severity | 🎯 Action Required | ⏰ Timeline |
-|-------|----------|-------------------|------------|
-| **9.0-10.0** | 🔴 **Critical** | Immediate fix | < 24 hours |
-| **7.0-8.9** | 🟠 **High** | Priority fix | < 7 days |
-| **4.0-6.9** | 🟡 **Medium** | Plan fix | < 30 days |
-| **0.1-3.9** | 🟢 **Low** | Consider fix | Next release |
-
-<details>
-<summary>💭 <strong>Real-World Scenario:</strong> Your scan shows 50 vulnerabilities. What do you do?</summary>
-
-**Step-by-step vulnerability triage:**
-
-1. **🔴 Address Critical/High first**
-   - Focus on actively exploitable vulnerabilities
-   - Check if patches are available
-   - Prioritize by EPSS (Exploit Prediction Scoring System)
-
-2. **📊 Analyze false positives**
-   - Some vulnerabilities may not apply to your use case
-   - Use scanner suppression files for confirmed false positives
-   - Document reasoning for suppression
-
-3. **🔄 Update strategy**
-   ```bash
-   # Update base image
-   FROM python:3.11-slim-bullseye  # Instead of outdated version
-   
-   # Update packages  
-   RUN apt-get update && apt-get upgrade -y && \
-       apt-get clean && rm -rf /var/lib/apt/lists/*
-   ```
-
-4. **📈 Set policies**
-   - No Critical vulnerabilities in production
-   - High vulnerabilities fixed within 7 days
-   - Regular scanning schedule (weekly/monthly)
-
-**Pro tip:** Not all vulnerabilities are equal! A SQL injection in a web service vs a command injection in a CLI tool have different risk levels.
-</details>
-
----
-
-## 🎉 Fun Break: "Container Horror Stories & Memes"
-
-### 😱 **"The 2018 Tesla Cryptocurrency Mining Incident"**
-
-**What happened:**
-* 🚗 Tesla left Kubernetes dashboard **publicly accessible** without authentication
-* 😈 Cryptominers discovered it and deployed mining containers
-* ⛏️ Mined Monero cryptocurrency using Tesla's cloud resources  
-* 💸 Generated **thousands of dollars** in cloud bills
-* 🔍 Tesla discovered it when AWS sent an unusually high bill
-
-**The meme-worthy part:**
-* 🤖 Tesla, a company building **AI-powered cars**, got pwned by basic container misconfig
-* 📰 Headlines: *"Tesla's AI cars are secure, but their containers aren't"*
-* 💬 Security community: *"They can make cars drive themselves but can't secure a dashboard"*
-
-### 🐳 **Classic Container Memes:**
-
-**"Docker vs VM Resource Usage"**
-```
-VM: I need 4GB RAM to run Hello World
-Container: Hold my beer... 4MB is enough
-```
-
-**"Container Debugging"**
-```
-Developer: "It works on my machine"
-DevOps: "It works in containers"  
-Security: "Your container is pwned"
-```
-
-**"Container Escape Reality"**
-```
-Junior Dev: "Containers are totally isolated!"
-Security Engineer: "docker run --privileged has entered the chat"
-```
-
-### 🎭 **Interactive Meme Creation Time!**
-
-**Fill in the blanks:**
-```
-Before containers: "It works on my _____"
-After containers: "It fails in _____"
-After security scanning: "It has _____ critical vulnerabilities"
-After hardening: "It _____ but it's secure!"
-```
-
-**Answers from the community:**
-- machine / production / 47 / runs slower 😂
-- laptop / staging / 1000 / doesn't run 💀
-- computer / k8s / zero / works perfectly 🏆
-
----
-
-🔗 **Container Security Resources for Group 1:**
-* [Docker Security Best Practices](https://docs.docker.com/develop/security-best-practices/)
-* [Container Security by Liz Rice (Free eBook)](https://info.aquasec.com/container-security-book)
-* [NIST Container Security Guide](https://www.nist.gov/publications/application-container-security-guide)
-* [CIS Docker Benchmark](https://www.cisecurity.org/benchmark/docker)
-* [Trivy Documentation](https://aquasecurity.github.io/trivy/)
-* [OWASP Container Security Top 10](https://github.com/OWASP/www-project-container-top-10)
-
-## 📂 Group 2: Container Runtime Security
-
-## 📍 Slide 5 – 🛡️ Container Runtime Security
-
-* 🛡️ **Runtime Security** = monitoring containers while they're running, not just during build
-* 🚨 **Runtime Threats:**
-  * 🐚 **Malicious process execution** (reverse shells, crypto miners)
-  * 📁 **Unauthorized file access** (reading `/etc/passwd`, config files)
-  * 🌐 **Suspicious network activity** (C2 communication, data exfiltration)
-  * 🔓 **Privilege escalation** attempts
-* 🔍 **Detection Tools:**
-  * 🦅 **Falco** = CNCF project, runtime security monitoring
-  * 📊 **Sysdig** = commercial platform with Falco underneath
-  * ⚡ **Aqua Security** = comprehensive runtime protection
-* 📊 **Stats**: 68% of organizations experienced runtime security incidents (Stackrox Report 2024)
-
-```mermaid
-flowchart LR
-    Container[📦 Running Container] --> Monitor[👁️ Runtime Monitor]
-    Monitor --> Rules[📋 Security Rules]
-    Rules --> Alert[🚨 Security Alert]
-    
-    subgraph "🚨 Runtime Threats"
-        Shell[🐚 Reverse Shell]
-        Crypto[⛏️ Crypto Mining]
-        Exfil[📤 Data Exfiltration]
-        Escalate[🔓 Privilege Escalation]
-    end
-    
-    style Container fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#2c3e50
-    style Alert fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-```
-
-<details>
-<summary>💭 <strong>Quick Question:</strong> How would you detect cryptocurrency mining?</summary>
-
-**Common indicators:**
-* 📊 High CPU usage (>80% sustained)
-* 🔍 Process names: `xmrig`, `ethminer`, `cpuminer`
-* 🌐 Network connections to mining pools
-* 📁 Files: `/tmp/.X11-unix/`, hidden directories
-
-**Falco rule example:**
-```yaml
-- rule: Detect Crypto Mining
-  condition: spawned_process and (proc.name contains "miner" or proc.name contains "xmrig")
-  output: Crypto mining detected (process=%proc.name)
-  priority: CRITICAL
-```
-</details>
-
----
-
-## 📍 Slide 6 – 🔐 Secrets Management in Containers
-
-* 🔑 **Container Secrets Problem:**
-  * ❌ **In Dockerfile** = visible to anyone with image access
-  * ❌ **Environment variables** = visible in process list (`docker inspect`)
-  * ❌ **Config files** = persisted in image layers forever
-* ✅ **Secure Solutions:**
-  * 🐳 **Docker Secrets** = encrypted at rest, in-memory only in container
-  * ☸️ **Kubernetes Secrets** = base64 encoded, etcd encryption
-  * 🏦 **External Vaults** = HashiCorp Vault, AWS Secrets Manager
-  * 🔌 **CSI Drivers** = mount secrets as files from external systems
-
-```mermaid
-flowchart LR
-    subgraph "❌ Insecure"
-        ENV[🌍 Environment Variables]
-        FILE[📁 Config Files]
-        DOCKER[🐳 Dockerfile Hardcoding]
-    end
-    
-    subgraph "✅ Secure"
-        DSEC[🐳 Docker Secrets]
-        KSEC[☸️ K8s Secrets]  
-        VAULT[🏦 External Vault]
-        CSI[🔌 CSI Secret Driver]
-    end
-    
-    style ENV fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-    style VAULT fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-```
-
-### 🔄 Secret Rotation Best Practices
-
-* ⏰ **Automatic rotation** every 30-90 days
-* 🔄 **Zero-downtime rotation** using external secret operators
-* 📊 **Audit secret access** and usage patterns
-* 🚫 **Revoke compromised secrets** immediately
-
----
-
-## 📍 Slide 7 – 📋 Container Compliance & Hardening
-
-* 📋 **CIS Docker Benchmark** = 100+ security recommendations for Docker
-* 🔒 **Container Hardening Checklist:**
-  * 👤 Run as non-root user (`USER 1001`)
-  * 📖 Read-only filesystem (`--read-only`)
-  * 🚫 Drop capabilities (`--cap-drop=ALL`)
-  * 🏠 Use specific user namespaces
-  * 📦 Scan images before deployment
-* 🛠️ **Compliance Tools:**
-  * ⚖️ **Docker Bench** = CIS benchmark automated checker
-  * ☸️ **kube-bench** = CIS Kubernetes benchmark scanner
-  * 📊 **Falco** = runtime compliance monitoring
-
-```mermaid
-flowchart LR
-    Image[📦 Container Image] --> Bench[⚖️ Docker Bench]
-    Runtime[🏃‍♂️ Running Container] --> Monitor[📊 Runtime Monitor]
-    K8s[☸️ Kubernetes] --> KubeBench[☸️ kube-bench]
-    
-    Bench --> Report[📋 Compliance Report]
-    Monitor --> Report
-    KubeBench --> Report
-    
-    subgraph "🔒 Hardening Checklist"
-        User[👤 Non-root User]
-        RO[📖 Read-only FS]
-        Caps[🚫 Drop Caps]
-        Scan[🔍 Image Scanning]
-    end
-    
-    style Report fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-```
-
-### 🛡️ Hardened Container Example
+## 📍 Slide 6 – 🪜 Dockerfile: The Six Rules
 
 ```dockerfile
-# ✅ SECURE DOCKERFILE
-FROM alpine:3.18
-
-# Create non-root user
-RUN addgroup -g 1001 appgroup && \
-    adduser -u 1001 -G appgroup -s /bin/sh -D appuser
-
-# Install only required packages
-RUN apk add --no-cache python3 py3-pip && \
-    rm -rf /var/cache/apk/*
-
-# Copy application
-COPY --chown=appuser:appgroup app.py /app/
-COPY --chown=appuser:appgroup requirements.txt /app/
-
-# Switch to non-root
-USER appuser
+# ✅ Hardened Dockerfile
+FROM node:22-alpine AS build                  # 1. Pinned, minimal base
 WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s \
-  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
-
-EXPOSE 8000
-CMD ["python3", "app.py"]
+FROM gcr.io/distroless/nodejs22-debian12      # 2. Distroless runtime
+WORKDIR /app
+COPY --from=build /app .
+COPY src/ ./src/
+USER 65532                                    # 3. Non-root user (nobody)
+ENV NODE_ENV=production                       # 4. No debug paths
+EXPOSE 3000                                   # 5. Explicit ports only
+HEALTHCHECK CMD ["node", "src/healthcheck.js"] # 6. Built-in healthcheck
+ENTRYPOINT ["/nodejs/bin/node", "src/server.js"]
 ```
 
-### 🚀 Running Hardened Containers
+| # | 🪜 Rule | 🎯 Why |
+|---|---|---|
+| 1 | Pin base by tag (or digest for max safety) | Same as L4 action pinning — immutability |
+| 2 | Use multi-stage + distroless or `-alpine` | Smaller attack surface; no shell to drop into |
+| 3 | `USER` non-root (numeric UID best for K8s) | runAsNonRoot policy compliance |
+| 4 | No build args for secrets | Embedded in image history; scrape-able with `docker history` |
+| 5 | Explicit EXPOSE — even if K8s doesn't read it | Documentation + IDE hints |
+| 6 | Built-in healthcheck | K8s readiness/liveness probes have something honest to call |
 
-```bash
-# ✅ SECURE RUNTIME FLAGS
-docker run \
-  --read-only \                    # Read-only filesystem
-  --tmpfs /tmp \                   # Writable temp directory  
-  --user 1001:1001 \              # Non-root user
-  --cap-drop=ALL \                 # Drop all capabilities
-  --cap-add=NET_BIND_SERVICE \     # Only add required caps
-  --security-opt=no-new-privileges \  # Prevent privilege escalation
-  --memory=512m \                  # Memory limit
-  --cpus=0.5 \                     # CPU limit
-  myapp:latest
-```
-
-### 📊 Compliance Scanning
-
-```bash
-# Docker Bench Security
-git clone https://github.com/docker/docker-bench-security.git
-cd docker-bench-security
-sudo sh docker-bench-security.sh
-
-# Output example:
-# [WARN] 4.5 - Ensure Content trust for Docker is Enabled
-# [PASS] 4.6 - Ensure HEALTHCHECK is enabled  
-# [FAIL] 5.1 - Ensure AppArmor Profile is Enabled
-```
-
-<details>
-<summary>💭 <strong>Challenge:</strong> Your container needs to write logs. How do you handle read-only filesystem?</summary>
-
-**Solutions:**
-
-1. **tmpfs mount** (in-memory):
-```bash
-docker run --read-only --tmpfs /var/log myapp:latest
-```
-
-2. **Volume mount**:
-```bash
-docker run --read-only -v /host/logs:/var/log myapp:latest
-```
-
-3. **Log to stdout/stderr**:
-```python
-# Instead of writing files, log to stdout
-import logging
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-```
-
-4. **External logging** (best):
-```bash
-# Use logging driver
-docker run --log-driver=fluentd myapp:latest
-```
-
-**Pro tip:** Cloud-native apps should log to stdout and let the orchestrator handle log collection!
-</details>
+* 🧠 Trivy's `--config` (misconfig) mode reads your Dockerfile and flags violations of these rules — you'll see this in Lab 7 Task 1
 
 ---
 
-## 🎉 Fun Break: "Container Security Fails"
+## 📍 Slide 7 – 🪶 Distroless, Alpine, or Ubuntu?
 
-### 😅 **"The Bitcoin Mining Dockerfile"**
+| 🏷️ Base | 🪶 Size | 🔍 Shell | 🪜 Use when |
+|---|---|---|---|
+| `ubuntu:24.04` | ~80MB | `bash` | Legacy apps, debugging tools needed |
+| `node:22-alpine` | ~50MB | `sh` (busybox) | Default for most apps; small CVE surface |
+| `gcr.io/distroless/nodejs22` | ~30MB | None | Production; no debug interaction needed |
+| `cgr.dev/chainguard/node` (Chainguard, paid) | ~25MB | None | Production with signed-by-default images |
 
-```dockerfile
-# Real Dockerfile found on Docker Hub (anonymized)
-FROM ubuntu:16.04
-RUN apt-get update && apt-get install -y wget
-RUN wget https://github.com/xmrig/xmrig/releases/download/v6.18.0/xmrig-6.18.0-linux-static-x64.tar.gz
-RUN tar -xf xmrig*.tar.gz
-RUN chmod +x xmrig-6.18.0/xmrig
-CMD ["./xmrig-6.18.0/xmrig", "--donate-level=1"]
-```
-
-**Community reactions:**
-* 😂 "Finally, a Dockerfile that mines its own hosting costs"
-* 🤦‍♂️ "Running this in production would be interesting"
-* 🔒 "Security team's nightmare in 8 lines"
-
-### 🎭 **Security Meme Generator:**
-
-```
-When junior dev runs:
-docker run --privileged -v /:/host ubuntu
-
-Senior dev: "Congratulations, you just _____ the host"
-Security team: "Time to _____ everything"  
-Manager: "How much will this cost to _____?"
-
-Popular answers:
-- pwned / reinstall / fix ($50k)
-- nuked / rebuild / explain (my job)
-- rooted / audit / cover up (priceless)
-```
+* 🪜 **Distroless was Google's 2018 contribution** — base images with only your runtime + dependencies. No shell = no `nsenter` from a compromised process; no package manager = no `apk add` exfiltration
+* 🚨 The cost: **you can't `kubectl exec -it -- sh`**. Debugging needs `kubectl debug` (k8s 1.23+) with an ephemeral container
+* 🧠 The right choice depends on operational maturity. **For this course:** distroless or alpine. Avoid `latest` of anything
 
 ---
 
-🔗 **Runtime Security Resources:**
-* [Falco Rules](https://github.com/falcosecurity/rules)
-* [Docker Secrets Guide](https://docs.docker.com/engine/swarm/secrets/)
-* [CIS Docker Benchmark](https://www.cisecurity.org/benchmark/docker)
-* [Container Security Checklist](https://github.com/krol3/container-security-checklist)
-## 📂 Group 3: Kubernetes Fundamentals & Architecture
+## 📍 Slide 8 – 🔎 Trivy: One Scanner, Six Targets
 
-## 📍 Slide 8 – ☸️ Kubernetes Architecture & Components
+* 🏢 By **Aqua Security**; first release **2019**; Go binary, single statically-linked tool
+* 🔢 Latest: **Trivy v0.69.x** (April 2026)
+* 🎯 Six targets Trivy scans:
+  1. **Image** (`trivy image ...`) — CVEs + misconfig + secrets in container images
+  2. **Filesystem** (`trivy fs ...`) — local directories
+  3. **Repository** (`trivy repo ...`) — Git repos for misconfig + secrets
+  4. **Kubernetes** (`trivy k8s ...`) — live cluster scan; uses RBAC to enumerate workloads
+  5. **AWS / Azure / GCP** (`trivy aws ...`) — live cloud config scan
+  6. **SBOM** (`trivy sbom ...`) — scan an existing CycloneDX/SPDX for CVEs
 
-* ☸️ **Kubernetes** = container orchestration platform managing 1000s of containers across multiple nodes
-* 🏗️ **Control Plane Components:**
-  * 🌐 **API Server** = all communication goes through here (kubectl, pods, everything)
-  * 🧠 **etcd** = distributed key-value store (cluster state, secrets, configs)
-  * 📅 **Scheduler** = decides which node runs each pod
-  * 🎛️ **Controller Manager** = maintains desired state (replication, endpoints, etc.)
-* 👷 **Worker Node Components:**
-  * 🤖 **kubelet** = node agent, manages pods and containers
-  * 🌐 **kube-proxy** = network proxy, handles service routing
-  * 🏃‍♂️ **Container Runtime** = Docker, containerd, or CRI-O
-* 📊 **Scale**: Google runs 2B+ containers/week on Kubernetes (2024)
+```bash
+# Lab 7 starts here
+trivy image bkimminich/juice-shop:v19.0.0 \
+  --severity HIGH,CRITICAL \
+  --format json --output juice-shop-scan.json
+```
+
+* 🧠 Same Trivy that absorbed tfsec (L6). Same Trivy that consumes the SBOM from L4. **One tool, integrated outputs.**
+
+---
+
+## 📍 Slide 9 – 🧱 Reading a Trivy Report
+
+```
+juice-shop (alpine 3.18.4)
+==========================
+Total: 23 (HIGH: 18, CRITICAL: 5)
+
+┌──────────────────┬───────────────┬──────────┬─────────────┬───────────────┐
+│ Library          │ Vulnerability │ Severity │ Installed   │ Fixed Version │
+├──────────────────┼───────────────┼──────────┼─────────────┼───────────────┤
+│ libcrypto3       │ CVE-2023-5363 │ HIGH     │ 3.1.4-r0    │ 3.1.4-r1      │
+│ libssl3          │ CVE-2023-5363 │ HIGH     │ 3.1.4-r0    │ 3.1.4-r1      │
+│ openssl          │ CVE-2024-0727 │ CRITICAL │ 3.1.4-r0    │ 3.1.4-r4      │
+│ glib             │ CVE-2024-34397│ HIGH     │ 2.76.6-r0   │ 2.76.6-r1     │
+└──────────────────┴───────────────┴──────────┴─────────────┴───────────────┘
+```
+
+| 🏷️ Column | 🎯 Meaning |
+|---|---|
+| Library | Package as found in image (deb/apk/rpm/jar/npm/...) |
+| Vulnerability | CVE ID — track in NVD or CIRCL |
+| Severity | NVD CVSS-based, also reflected in vendor advisories |
+| **Fixed Version** | If non-empty → a fix exists; not bumping is a choice |
+
+* 🪜 **The triage shortcut:** sort by *Fixed Version is not empty AND severity ≥ HIGH*. That's your weekly remediation queue
+* 🧠 **CVEs with no fix yet** still matter for risk acceptance — but they're a different conversation (Lecture 10)
+
+---
+
+## 📍 Slide 10 – 🪜 The Kubernetes Object Trinity for Security
 
 ```mermaid
-flowchart TB
-    subgraph "🏗️ Control Plane"
-        API[🌐 API Server]
-        ETCD[(🧠 etcd)]
-        SCHED[📅 Scheduler]
-        CTRL[🎛️ Controller Manager]
-    end
-    
-    subgraph "👷 Worker Node 1"
-        KUBELET1[🤖 kubelet]
-        PROXY1[🌐 kube-proxy]
-        RUNTIME1[🏃‍♂️ Container Runtime]
-        POD1[📦 Pods]
-    end
-    
-    subgraph "👷 Worker Node 2"
-        KUBELET2[🤖 kubelet]
-        PROXY2[🌐 kube-proxy] 
-        RUNTIME2[🏃‍♂️ Container Runtime]
-        POD2[📦 Pods]
-    end
-    
-    API --> KUBELET1
-    API --> KUBELET2
-    ETCD --> API
-    SCHED --> API
-    CTRL --> API
-    
-    style API fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#2c3e50
-    style ETCD fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
+graph TB
+    P[👤 Pod / Workload] -->|uses| SA[⚙️ ServiceAccount]
+    SA -->|bound by| RB[📜 RoleBinding / ClusterRoleBinding]
+    RB -->|grants| R[🪪 Role / ClusterRole]
+    R -->|allows verbs on| Res[📦 Resources]
+
+    P -->|sends/recvs traffic| NP[🌐 NetworkPolicy]
+
+    style P fill:#2196F3,color:#fff
+    style R fill:#F44336,color:#fff
+    style NP fill:#4CAF50,color:#fff
 ```
 
-### 🔒 Security Boundaries & Trust Zones
+* 🪪 **RBAC** = Role-Based Access Control. The right model for cluster authz since K8s 1.6 (2017)
+* 🚨 **Three common excessive-privilege patterns:**
+  1. **Wildcard ClusterRoles** — `verbs: ["*"]`, `resources: ["*"]` ≡ root-of-cluster
+  2. **Default ServiceAccount used by app pods** — every pod can talk to the K8s API
+  3. **No NetworkPolicy** — every pod can connect to every other pod (the "flat network" failure mode)
 
-| Component | Trust Level | Attack Surface | Impact if Compromised |
-|-----------|-------------|----------------|----------------------|
-| 🌐 **API Server** | 🔴 Critical | High | Complete cluster control |
-| 🧠 **etcd** | 🔴 Critical | Medium | All secrets exposed |
-| 🤖 **kubelet** | 🟠 High | Medium | Node compromise |
-| 📦 **Pod** | 🟢 Low | High | Container breakout |
-
-### 🌐 Kubernetes Networking Model
-
-* 📡 **Every pod gets its own IP** (no NAT between pods)
-* 🔗 **Pods can communicate** with all other pods by default
-* 🚪 **Services provide stable endpoints** for dynamic pods
-* 🛡️ **Network Policies** = firewall rules for pod-to-pod communication
-
-<details>
-<summary>💭 <strong>Security Question:</strong> What happens if etcd gets compromised?</summary>
-
-**Complete disaster! 💥**
-
-**What's in etcd:**
-* 🔑 All Kubernetes secrets (base64 encoded, not encrypted by default)
-* 🎫 Service account tokens
-* ⚙️ ConfigMaps with sensitive data
-* 🔐 TLS certificates
-* 🏗️ All cluster configuration
-
-**Attack scenarios:**
-* 📤 Extract all secrets and tokens
-* 🎭 Impersonate any service account
-* 🔧 Modify cluster configuration
-* 💣 Deploy malicious workloads
-
-**Protection:**
-* 🔐 Enable etcd encryption at rest
-* 🔒 Restrict etcd network access
-* 🛡️ Use strong authentication
-* 📊 Monitor etcd access logs
-</details>
+* 🪜 In Lab 7 Task 2 you'll harden a manifest against all three
 
 ---
 
-## 📍 Slide 9 – 🔑 Kubernetes Authentication & Authorization
+## 📍 Slide 11 – 🛡️ Pod Security Standards (PSS)
 
-* 🔑 **Authentication** = Who are you?
-  * 📜 **X.509 Certificates** = most common, used by kubectl
-  * 🎫 **Service Account Tokens** = for pods to access API
-  * 🌐 **OIDC/OAuth** = integration with external identity providers
-  * 🔐 **Static tokens** = deprecated, avoid in production
-* 🛡️ **Authorization** = What can you do? (RBAC = Role-Based Access Control)
-  * 👤 **Users** = humans with certificates
-  * 🤖 **Service Accounts** = pods/applications  
-  * 👥 **Groups** = collection of users
-  * 🎭 **Roles** = set of permissions (verbs + resources)
-* 📊 **Default behavior**: Service accounts have minimal permissions (good!)
+* 🏛️ **PodSecurityPolicy (PSP)** — first K8s admission control, **deprecated in 1.21, removed in 1.25**. Replaced by:
+* 🏛️ **Pod Security Admission (PSA)** + **Pod Security Standards (PSS)** — stable in **K8s 1.25 (August 2022)**
 
-```mermaid
-flowchart LR
-    User[👤 User/Pod] --> Auth[🔑 Authentication]
-    Auth --> AuthZ[🛡️ Authorization RBAC]
-    AuthZ --> API[🌐 API Server]
-    
-    subgraph "🔑 Auth Methods"
-        Cert[📜 X.509 Certs]
-        Token[🎫 SA Tokens]  
-        OIDC[🌐 OIDC/OAuth]
-    end
-    
-    subgraph "🛡️ RBAC Components"
-        Role[🎭 Roles]
-        Binding[🔗 RoleBindings]
-        Subject[👤 Subjects]
-    end
-    
-    style Auth fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#2c3e50
-    style AuthZ fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-```
+| 🎚️ Level | 🚦 Allows | 🪜 Use for |
+|---|---|---|
+| `privileged` | Everything (host PID, host network, all capabilities) | Sysadmin/CNI namespaces only |
+| `baseline` | No host namespaces, no `runAsRoot`, drops dangerous capabilities | App workloads (default) |
+| `restricted` | Full hardening: read-only root FS, capabilities ALL dropped, runAsNonRoot enforced | Production app workloads |
 
-<details>
-<summary>💭 <strong>RBAC Challenge:</strong> How do you give a pod access to create other pods?</summary>
-
-**Careful! This is dangerous! 🚨**
+* 🪜 **Apply by namespace label:**
 
 ```yaml
-# ⚠️ HIGH RISK ROLE
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["create", "get", "list"]
-
-# Better: Use Jobs or Deployments
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role  
-rules:
-- apiGroups: ["batch"]
-  resources: ["jobs"]
-  verbs: ["create"]
-```
-
-**Why dangerous:**
-* 📦 Can create privileged pods
-* 🔓 Can mount service account tokens
-* 🌐 Can access host network
-* 💣 Essentially cluster-admin via pod creation
-
-**Better alternatives:**
-* 🎯 Use specific controllers (Jobs, CronJobs)
-* 🔒 Admission controllers to prevent privilege escalation
-* 🛡️ Pod Security Standards
-</details>
-
----
-
-## 📍 Slide 10 – 🚪 Kubernetes Admission Control & Policies
-
-* 🚪 **Admission Controllers** = gatekeepers that intercept requests before persistence
-* 🔄 **Two Types:**
-  * 🔧 **Mutating** = modify requests (add labels, inject sidecars)
-  * ✅ **Validating** = approve/reject requests (policy enforcement)
-* 🛡️ **Pod Security Standards** (replaces deprecated Pod Security Policies):
-  * 🔓 **Privileged** = unrestricted (development only)
-  * ⚡ **Baseline** = minimally restrictive (default production)
-  * 🔒 **Restricted** = heavily restricted (high security)
-* 🎯 **Open Policy Agent (OPA) Gatekeeper** = policy-as-code for Kubernetes
-
-```mermaid
-flowchart LR
-    Request[📝 kubectl apply] --> Mutating[🔧 Mutating Admission]
-    Mutating --> Validating[✅ Validating Admission]  
-    Validating --> Accept{✅ Accept?}
-    Accept -->|Yes| etcd[(🧠 etcd)]
-    Accept -->|No| Reject[❌ Reject]
-    
-    subgraph "🛡️ Policy Examples"
-        PSS[🔒 Pod Security Standards]
-        OPA[🎯 OPA Gatekeeper]
-        Custom[⚙️ Custom Webhooks]
-    end
-    
-    style Validating fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-    style Reject fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-```
-
-### 🛠️ Common Admission Controller Use Cases
-
-| Use Case | Tool | Example |
-|----------|------|---------|
-| 🔒 **Security Policies** | Pod Security Standards | Block privileged containers |
-| 🏷️ **Resource Quotas** | ResourceQuota controller | Limit CPU/memory per namespace |
-| 🎯 **Policy Enforcement** | OPA Gatekeeper | Require specific labels |
-| 🔐 **Secret Injection** | Custom webhook | Inject certificates from Vault |
-| 📊 **Monitoring** | Mutating webhook | Add monitoring sidecars |
-
-<details>
-<summary>💭 <strong>Policy Question:</strong> Should you block or warn for policy violations?</summary>
-
-**Three enforcement modes:**
-
-1. **🚫 Enforce (Block)**
-   - Rejects violating resources
-   - Prevents deployment
-   - Use for critical security policies
-
-2. **⚠️ Warn**
-   - Shows warning but allows deployment
-   - Good for gradual policy rollout
-   - Doesn't break existing workflows
-
-3. **📊 Audit (Log only)**
-   - Records violations for analysis
-   - No user impact
-   - Great for understanding current state
-
-**Best practice strategy:**
-```yaml
-# Start with audit, then warn, then enforce
-pod-security.kubernetes.io/audit: restricted     # Log violations
-pod-security.kubernetes.io/warn: restricted      # Show warnings  
-pod-security.kubernetes.io/enforce: baseline     # Block only worst violations
-```
-
-**Gradual rollout timeline:**
-- Week 1-2: Audit mode (gather data)
-- Week 3-4: Warn mode (educate teams)
-- Week 5+: Enforce mode (block violations)
-</details>
-
----
-
-## 🎉 Fun Break: "Kubernetes RBAC Horror Stories"
-
-### 😱 **"The cluster-admin Intern"**
-
-**What happened:**
-```bash
-# Intern's first day task: "Fix the broken deployment"
-kubectl create clusterrolebinding fix-it \
-  --clusterrole=cluster-admin \
-  --serviceaccount=default:my-app
-
-# Translation: "Give my app GOD MODE to the entire cluster"
-```
-
-**The aftermath:**
-* 🤖 App gained ability to delete entire cluster
-* 💥 One typo away from production disaster
-* 🔍 Security audit found 47 service accounts with cluster-admin
-* 📚 Emergency RBAC training for all developers
-
----
-
-🔗 **Kubernetes Security Resources:**
-* [Kubernetes Security Best Practices](https://kubernetes.io/docs/concepts/security/)
-* [RBAC Documentation](https://kubernetes.io/docs/reference/access-authn-authz/rbac/)
-* [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
-* [OPA Gatekeeper](https://open-policy-agent.github.io/gatekeeper/)
-
-## 📂 Group 4: Kubernetes Security Features
-
-## 📍 Slide 11 – 🛡️ Pod Security & Isolation
-
-* 🛡️ **Security Contexts** = pod/container-level security settings
-* 🔧 **Key Security Controls:**
-  * 👤 **runAsUser/runAsGroup** = avoid root (UID 0)
-  * 🚫 **allowPrivilegeEscalation: false** = block setuid binaries
-  * 📖 **readOnlyRootFilesystem: true** = immutable container filesystem
-  * 💪 **capabilities** = fine-grained Linux permissions (drop ALL, add specific)
-* 🌐 **Network Policies** = firewall rules for pod-to-pod communication
-* 📊 **Resource Limits** = prevent DoS attacks (CPU/memory bombs)
-* 🔒 **Pod Security Standards** = enforce security baselines across namespaces
-
-```mermaid
-flowchart LR
-    subgraph "🛡️ Pod Security Context"
-        User[👤 runAsNonRoot: true]
-        RO[📖 readOnlyRootFilesystem]
-        Caps[💪 capabilities: drop ALL]
-        Priv[🚫 allowPrivilegeEscalation: false]
-    end
-    
-    subgraph "🌐 Network Isolation"
-        NP[🔥 Network Policies]
-        Ingress[⬅️ Ingress Rules]
-        Egress[➡️ Egress Rules]
-    end
-    
-    Pod[📦 Secure Pod] --> User
-    Pod --> NP
-    
-    style Pod fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-    style NP fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#2c3e50
-```
-
-<details>
-<summary>💭 <strong>Quick Challenge:</strong> Why does readOnlyRootFilesystem break many apps?</summary>
-
-**Common issues:**
-* 📝 Apps writing logs to `/var/log/`
-* 📦 Package managers creating `/tmp/` files
-* 🔧 Apps modifying config files at runtime
-* 🏠 Home directory writes (`~/.cache`, `~/.config`)
-
-**Solutions:**
-```yaml
-# Mount writable volumes for specific paths
-volumeMounts:
-- name: tmp
-  mountPath: /tmp
-- name: logs  
-  mountPath: /var/log
-- name: cache
-  mountPath: /home/app/.cache
-
-volumes:
-- name: tmp
-  emptyDir: {}
-- name: logs
-  emptyDir: {}  
-- name: cache
-  emptyDir: {}
-```
-
-**Pro tip:** Test with `readOnlyRootFilesystem: true` in dev first!
-</details>
-
----
-
-## 📍 Slide 12 – 🔒 Kubernetes Secrets & ConfigMaps
-
-* 🔒 **Kubernetes Secrets** = base64 encoded, stored in etcd (⚠️ NOT encrypted by default!)
-* 📋 **ConfigMaps** = non-sensitive configuration data
-* 🚨 **Secret Security Issues:**
-  * 📤 Visible in `kubectl describe pod` output
-  * 💾 Stored in etcd unencrypted (unless configured)
-  * 👁️ Accessible to anyone with pod read permissions
-  * 📜 Logged in various places if not careful
-* ✅ **Better Alternatives:**
-  * 🏦 **External Secret Operators** (ESO) = sync from Vault/AWS/Azure
-  * 🔌 **CSI Secret Store Driver** = mount secrets as files
-  * 🔐 **Sealed Secrets** = encrypted secrets safe for Git
-
-```mermaid
-flowchart LR
-    subgraph "❌ K8s Secrets Issues"
-        B64[📝 Base64 Encoded<br/>NOT Encrypted]
-        ETCD[(🧠 etcd<br/>Plaintext)]
-        Logs[📜 Visible in Logs]
-    end
-    
-    subgraph "✅ Secure Alternatives"
-        ESO[🏦 External Secret Operator]
-        CSI[🔌 CSI Secret Driver]  
-        Sealed[🔐 Sealed Secrets]
-    end
-    
-    Secret[🔒 K8s Secret] --> B64
-    B64 --> ETCD
-    
-    External[🏦 External Vault] --> ESO
-    External --> CSI
-    
-    style ETCD fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-    style ESO fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-```
-
-### 🔐 Secret Management Comparison
-
-| Method | Security | Complexity | Git-Safe | Rotation |
-|--------|----------|------------|----------|----------|
-| 🔒 **K8s Secrets** | ⚠️ Low | Low | ❌ No | Manual |
-| 🏦 **External Secret Operator** | ✅ High | Medium | ✅ Yes | Automatic |
-| 🔌 **CSI Driver** | ✅ High | Medium | ✅ Yes | Automatic |
-| 🔐 **Sealed Secrets** | ✅ Medium | Low | ✅ Yes | Manual |
-
----
-
-## 📍 Slide 13 – 📊 Kubernetes Auditing & Monitoring
-
-* 📊 **Audit Logging** = records all API server requests (who did what when)
-* 🎯 **Audit Levels:**
-  * 📝 **Metadata** = request metadata only
-  * 📋 **Request** = metadata + request body
-  * 📤 **Response** = metadata + request + response bodies
-* 🔍 **What to Monitor:**
-  * 🚨 Failed authentication attempts
-  * 🔑 Secret/ConfigMap access
-  * 👑 Privileged pod creation
-  * 🌐 Exec/portforward sessions
-* 🛠️ **Monitoring Stack**: Prometheus + Grafana + Falco + ELK
-
-```mermaid
-flowchart LR
-    API[🌐 API Server] --> Audit[📊 Audit Logs]
-    Nodes[👷 Worker Nodes] --> Metrics[📈 Node Metrics]
-    Pods[📦 Pods] --> Logs[📜 Application Logs]
-    
-    Audit --> SIEM[🔍 SIEM/ELK]
-    Metrics --> Prometheus[📊 Prometheus]
-    Logs --> FluentD[📡 FluentD]
-    
-    Prometheus --> Grafana[📈 Grafana]
-    SIEM --> Alerts[🚨 Security Alerts]
-    
-    style Audit fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#2c3e50
-    style Alerts fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-```
-
-### 📊 Security Metrics Dashboard
-
-| Metric | Normal | Suspicious |
-|--------|--------|------------|
-| 🔑 **Secret Access/hour** | < 50 | > 200 |
-| 🐚 **Exec Sessions/day** | < 10 | > 50 |
-| 👑 **Privileged Pods** | 0-2 | > 5 |
-| ❌ **Failed Auth/hour** | < 5 | > 20 |
-| 📦 **Pod Creation Spikes** | Steady | 10x increase |
-
-<details>
-<summary>💭 <strong>Monitoring Question:</strong> How do you detect a cryptocurrency mining attack?</summary>
-
-**Kubernetes-specific:**
-* 🚨 Unexpected pod creation in system namespaces
-* 📈 Sudden resource quota exhaustion  
-* 🔄 Pods restarting due to resource limits
-* 🌐 Unknown container images from suspicious registries
-
-**Response:**
-1. 🛑 `kubectl delete pod <suspicious-pods>`
-2. 🔍 Check audit logs for how pods were created
-3. 🔒 Review RBAC permissions
-4. 📊 Implement resource quotas and limits
-</details>
-
----
-
-## 🎉 Fun Break: "Kubernetes Secrets Exposed!"
-
-### 🤦‍♂️ **"The Base64 Confusion"**
-
-**Slack conversation:**
-```
-Junior Dev: "I encrypted our database password!"
-Senior Dev: "Great! How?"
-Junior Dev: "echo 'password123' | base64"
-Senior Dev: "That's... not encryption 😅"
-Junior Dev: "But it's unreadable!"
-Senior Dev: "echo 'cGFzc3dvcmQxMjM=' | base64 -d"
-Junior Dev: "... oh"
-```
-
-### 🔍 **"Secret Scanning Memes"**
-
-```
-Kubernetes Secrets be like:
-
-Developer: "Our secrets are secure in base64!"
-Security Scanner: "I can read that"
-Developer: "But it's encoded!"  
-Security Scanner: "Here's your plaintext password"
-Developer: *surprised Pikachu face*
-```
-
-### 🎭 **Interactive K8s Quiz:**
-
-```
-What's wrong with this Secret usage?
-
 apiVersion: v1
-kind: Pod
-spec:
-  containers:
-  - name: app
-    env:
-    - name: DB_PASS
-      valueFrom:
-        secretKeyRef:
-          name: db-secret
-          key: password
-    - name: DEBUG  
-      value: "true"  # Logs everything including env vars! 🤦‍♂️
-
-Answer: Debug mode will log environment variables, exposing the secret!
-
-Better: Use mounted secret files instead of env vars when possible.
+kind: Namespace
+metadata:
+  name: juice-shop
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
 ```
 
-### 💡 **Security Pro Tips:**
-
-```
-❌ Don't: kubectl create secret generic mysecret --from-literal=password=123
-✅ Do: Use external secret management
-
-❌ Don't: Store secrets in environment variables  
-✅ Do: Mount secrets as files when possible
-
-❌ Don't: Log request/response bodies in production
-✅ Do: Use metadata-level audit logging for secrets
-```
+* 🧠 `enforce` blocks creation; `warn` logs to kubectl; `audit` logs to audit log. **In dev, start with `warn`; in prod, escalate to `enforce`**
 
 ---
 
-🔗 **Kubernetes Security Features Resources:**
-* [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
-* [Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/)
-* [Kubernetes Secrets](https://kubernetes.io/docs/concepts/configuration/secret/)
-* [External Secrets Operator](https://external-secrets.io/)
-* [Kubernetes Auditing](https://kubernetes.io/docs/tasks/debug-application-cluster/audit/)
+## 📍 Slide 12 – 🛠️ securityContext: The Per-Pod Hardening
 
-## 📂 Group 5: Kubernetes Security Tools & Practices
-
-## 📍 Slide 14 – 🔍 Kubernetes Security Scanning
-
-* 🔍 **Static Analysis Tools:**
-  * 🎯 **kube-score** = YAML analysis, best practices scoring
-  * 🏹 **kube-hunter** = penetration testing from attacker perspective  
-  * ⭐ **Polaris** = configuration validation, security recommendations
-  * 📊 **Checkov** = policy-as-code scanning for K8s manifests
-* 🏃‍♂️ **Runtime Security:**
-  * 🦅 **Falco** = runtime threat detection
-  * 🔍 **Sysdig Secure** = comprehensive runtime protection
-  * ⚡ **Aqua Security** = container runtime security platform
-* 📊 **Compliance Scanning:**
-  * ☸️ **kube-bench** = CIS Kubernetes benchmark automation
-  * 📋 **Popeye** = cluster sanitizer, finds issues and recommendations
-
-```mermaid
-flowchart LR
-    Manifest[📝 K8s Manifest] --> Static[🔍 Static Scan]
-    Cluster[☸️ Running Cluster] --> Runtime[🏃‍♂️ Runtime Scan]
-    Config[⚙️ Cluster Config] --> Compliance[📋 Compliance Scan]
-    
-    Static --> Issues[📋 Security Issues]
-    Runtime --> Threats[🚨 Live Threats]  
-    Compliance --> Gaps[⚠️ Compliance Gaps]
-    
-    style Issues fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#2c3e50
-    style Threats fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-```
-
-### 🛠️ Quick Tool Comparison
-
-| Tool | Focus | Speed | Difficulty |
-|------|-------|-------|------------|
-| 🎯 **kube-score** | Best practices | ⚡ Fast | Easy |
-| 🏹 **kube-hunter** | Penetration testing | 🐌 Slow | Medium |
-| ⭐ **Polaris** | Config validation | ⚡ Fast | Easy |
-| ☸️ **kube-bench** | CIS compliance | 🚀 Medium | Easy |
-
-<details>
-<summary>💭 <strong>Which tool first?</strong></summary>
-
-**Recommended order:**
-1. 🎯 **kube-score** → quick YAML validation  
-2. ☸️ **kube-bench** → baseline security check
-3. ⭐ **Polaris** → ongoing configuration monitoring
-4. 🏹 **kube-hunter** → penetration testing (advanced)
-
-**Start simple, add complexity gradually!**
-</details>
-
----
-
-## 📍 Slide 15 – 🌐 Kubernetes Network Security
-
-* 🔥 **Network Policies** = firewall rules for pods (deny-by-default recommended)
-* 🕸️ **CNI Security Features:**
-  * 🐋 **Calico** = advanced network policies, encryption
-  * 🐝 **Cilium** = eBPF-based security, L7 policies
-  * 🌐 **Istio** = service mesh with mTLS, traffic policies
-* 🔒 **Security Patterns:**
-  * 🚫 **Default deny-all** → explicit allow only required traffic
-  * 🏠 **Namespace isolation** → prevent cross-namespace communication  
-  * 🔐 **mTLS everywhere** → encrypted pod-to-pod communication
-  * 🛡️ **Ingress security** → WAF, rate limiting, SSL termination
-
-```mermaid
-flowchart LR
-    Pod1[📦 Pod A] -.-> Firewall[🔥 Network Policy]
-    Firewall --> Pod2[📦 Pod B]
-    
-    subgraph "🔒 Security Features"
-        CNI[🕸️ CNI Security]
-        mTLS[🔐 mTLS]
-        WAF[🛡️ WAF/Ingress]
-    end
-    
-    style Firewall fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-    style CNI fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-```
-
-### 🌐 CNI Comparison
-
-| CNI | Security Focus | Complexity | Performance |
-|-----|----------------|------------|-------------|
-| 🐋 **Calico** | Network policies | Medium | High |
-| 🐝 **Cilium** | eBPF L7 security | High | Very High |  
-| 🌐 **Istio** | Service mesh mTLS | Very High | Medium |
-
----
-
-## 📍 Slide 16 – 🏗️ Secure Kubernetes CI/CD Pipelines
-
-* 🚀 **GitOps Security:**
-  * 📂 **ArgoCD** = declarative GitOps with RBAC
-  * 🌊 **Flux** = GitOps toolkit with security controls
-  * 🔒 **Sealed Secrets** = encrypted secrets in Git
-* 🏗️ **Pipeline Security:**
-  * 📦 **Image signing** (Cosign, Notary v2)
-  * 🔍 **Policy enforcement** at deployment time
-  * 🎯 **Supply chain attestation** (SLSA, in-toto)
-* 🛡️ **Deployment Patterns:**
-  * 🔵 **Blue-green** deployments for security updates
-  * 🐥 **Canary** releases with security monitoring
-  * 📊 **Progressive delivery** with automated rollback
-
-```mermaid
-flowchart LR
-    Git[📂 Git Repo] --> GitOps[🚀 GitOps Controller]
-    GitOps --> Policy[🛡️ Policy Check]
-    Policy --> Deploy[🚀 Deploy]
-    
-    subgraph "🔒 Security Gates"
-        Sign[✍️ Image Signing]
-        Scan[🔍 Security Scan]
-        Test[🧪 Security Tests]
-    end
-    
-    Policy --> Sign
-    Policy --> Scan  
-    Policy --> Test
-    
-    style Policy fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#2c3e50
-```
-
-### 📊 Security Metrics
-
-| Metric | Target | Alert |
-|--------|--------|-------|
-| 🔍 **Images scanned** | 100% | < 95% |
-| ✍️ **Signed images** | 100% | < 100% |
-| 🚨 **Critical CVEs** | 0 | > 0 |
-| ⏱️ **Deployment time** | < 10min | > 15min |
-
----
-
-## 🎉 Fun Break: "K8s Security Tool Chaos"
-
-### 😅 **"The Tool Overload Syndrome"**
-
-```
-Security Engineer's Desktop:
-- kube-score ✅
-- kube-hunter ✅
-- kube-bench ✅  
-- Polaris ✅
-- Falco ✅
-- Trivy ✅
-- Snyk ✅
-- Checkov ✅
-
-Developer: "Which one do I use?"
-Security: "Yes."
-```
-
-### 🎭 **Network Policy Memes:**
-
-```
-NetworkPolicy be like:
-
-Default: "Everyone can talk to everyone! 🎉"
-Security team: "NOPE" *applies default-deny*
-Developers: "Nothing works! 😭"
-Security team: "Working as intended ✅"
-```
-
-### 🔧 **Tool Selection Reality:**
-
-```
-Manager: "We need ALL the security tools!"
-Budget: "Pick one."
-Security team: "kube-bench + Falco"
-Manager: "But what about..."
-Security team: "KISS principle wins again"
-```
-
----
-
-🔗 **K8s Security Tools Resources:**
-* [kube-score](https://github.com/zegl/kube-score)
-* [kube-hunter](https://github.com/aquasecurity/kube-hunter)  
-* [Polaris](https://github.com/FairwindsOps/polaris)
-* [Falco Rules](https://github.com/falcosecurity/rules)
-* [Cilium Network Policies](https://docs.cilium.io/en/stable/security/policy/)
-
-## 📂 Group 6: Advanced Topics & Case Studies
-
-## 📍 Slide 17 – 🚨 Kubernetes Attack Scenarios & Defense
-
-* 🎯 **Common Attack Vectors:**
-  * 🔓 **Privileged container breakout** → host compromise
-  * 🔑 **Service account token abuse** → lateral movement
-  * 🌐 **Exposed API server** → cluster takeover
-  * 📦 **Malicious images** → supply chain compromise
-  * ☁️ **Cloud metadata access** → credential theft
-* 🛡️ **MITRE ATT&CK for Containers:**
-  * 🎯 **Initial Access** → exposed services, supply chain
-  * 🔓 **Privilege Escalation** → privileged containers, hostPath mounts
-  * 📡 **Lateral Movement** → service account tokens, network access
-
-```mermaid
-flowchart LR
-    subgraph "🎯 Attack Chain"
-        Initial[🚪 Initial Access] --> Escalate[🔓 Privilege Escalation]
-        Escalate --> Lateral[📡 Lateral Movement]
-        Lateral --> Persist[🔄 Persistence]
-        Persist --> Exfil[📤 Exfiltration]
-    end
-    
-    subgraph "🛡️ Defense Layers"
-        Prevent[🚫 Prevent]
-        Detect[👁️ Detect]
-        Respond[🚨 Respond]
-    end
-    
-    style Initial fill:#ffebee,stroke:#d32f2f,stroke-width:2px,color:#2c3e50
-    style Prevent fill:#e8f5e8,stroke:#388e3c,stroke-width:2px,color:#2c3e50
-```
-
-### 🛡️ Defense Matrix
-
-| Attack Vector | Detection | Prevention |
-|---------------|-----------|------------|
-| 🔓 **Privileged pods** | Falco rules | Pod Security Standards |
-| 🔑 **Token abuse** | Audit logs | RBAC least privilege |
-| 🌐 **API exposure** | Network monitoring | Network policies |
-| 📦 **Malicious images** | Image scanning | Admission controllers |
-
-<details>
-<summary>💭 <strong>Attack Scenario:</strong> How would you detect crypto mining?</summary>
-
-**Detection signals:**
-* 📊 High CPU usage (>90% sustained)
-* 🌐 Connections to mining pools (port 4444, 3333)
-* 🔍 Process names: `xmrig`, `ethminer`, `cpuminer`
-* 📈 Unusual network traffic patterns
-
-**Falco rule:**
 ```yaml
-- rule: Cryptocurrency Mining
-  condition: spawned_process and proc.name in (xmrig, cpuminer, ethminer)
-  output: Crypto mining detected (proc=%proc.name)
-  priority: CRITICAL
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      automountServiceAccountToken: false      # 🚦 Default-deny K8s API
+      securityContext:
+        runAsNonRoot: true                     # 🚦 Enforced by PSS restricted
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault                 # 🚦 Block dangerous syscalls
+      containers:
+        - name: app
+          image: ghcr.io/me/juice-shop@sha256:...
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false    # 🚦 No setuid binaries
+            readOnlyRootFilesystem: true       # 🚦 Tampering protection
+            capabilities:
+              drop: ["ALL"]                    # 🚦 Drop every Linux capability
+          resources:
+            limits: { memory: "256Mi", cpu: "200m" }   # 🚦 DoS protection
+            requests: { memory: "128Mi", cpu: "50m" }
 ```
-</details>
+
+* 🪜 **Every line here is a Trivy misconfig rule.** Run `trivy k8s` against your cluster; missing items show up as findings
+* 🧠 `readOnlyRootFilesystem: true` is the single most effective runtime hardening — and the one most often skipped because apps write temp files. Use `emptyDir` volumes for those
 
 ---
 
-## 📍 Slide 18 – 🔮 Future Trends & Security Checklist
+## 📍 Slide 13 – 🔬 Case Study: Docker Hub 2019
 
-* 🔮 **Emerging Trends:**
-  * 🤖 **AI-powered threat detection** → behavioral analysis, anomaly detection
-  * 🛡️ **Zero-trust containers** → verify everything, trust nothing
-  * 📋 **SBOM for containers** → software bill of materials tracking
-  * 🔐 **Workload identity** → SPIFFE/SPIRE adoption
-  * ☁️ **Confidential computing** → encrypted container workloads
-* 🚀 **Next-Gen Security:**
-  * 🦀 **WebAssembly (WASM)** → lightweight, secure container alternative
-  * 🔗 **Supply chain attestation** → provenance verification
-  * 📊 **Policy-as-code evolution** → Git-native security policies
+* 🗓️ **April 25, 2019** — Docker discloses unauthorized access to a database holding **190,000 accounts** with hashed passwords, GitHub/Bitbucket tokens, and Docker registry tokens
+* 🧠 The breach wasn't a container escape — it was **Docker Hub's own infrastructure** breached via API. But the impact propagated through every customer
+* 🪜 **DevSecOps lessons:**
+  * 🪪 Rotate registry tokens regularly (the long-lived-token failure mode again, from Lecture 4)
+  * 🔏 Pin and sign images (Lab 8) — even if the registry is compromised, verified signatures help
+  * 🛡️ Image scanning catches *only* known CVEs; registry compromises need orthogonal controls
+
+> 💬 *"Container security is application security, plus host security, plus orchestrator security, plus registry security."* — Liz Rice paraphrased; container security is **not a layer**, it's an intersection
+
+---
+
+## 📍 Slide 14 – 🔬 Case Study: runc CVE-2024-21626 ("Leaky Vessels")
+
+* 🗓️ **January 31, 2024** — Snyk discloses CVE-2024-21626 in runc: a working-directory race condition lets a malicious image **escape its container** to the host filesystem
+* 🌍 runc powers Docker, containerd, Kubernetes, Podman — essentially every container runtime
+* 🛡️ **What protected secure deployments:**
+  * 🛠️ Patched runc within hours of release (operational discipline)
+  * 🪜 **Read-only root filesystem** on the container — limits the attacker's write scope after escape
+  * 🐝 **Runtime detection** (Falco, Lab 9) — flags the unusual chdir + filesystem activity
+* 🧠 **The takeaway:** even with perfect image hygiene, runtime CVEs happen. Defense in depth at the **runtime + kernel** layers (L9) is non-negotiable
+
+---
+
+## 📍 Slide 15 – 🌐 NetworkPolicy: The "Flat Network" Cure
+
+* 🪜 By default in K8s, **every pod can reach every other pod**. This is the "flat network" failure mode
+* 🎯 **NetworkPolicy** lets you write firewall-style rules at the pod label level (works with most CNIs: Calico, Cilium, Antrea, Weave)
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: juice-shop-default-deny
+  namespace: juice-shop
+spec:
+  podSelector: {}                # all pods
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { name: monitoring }   # allow → monitoring NS only
+```
+
+* 🪜 **Pattern that scales:** **default-deny** at the namespace level + explicit allows. Same philosophy as IAM (L6) — default-deny + targeted-allow
+* 🧠 Lab 7 Task 2 includes adding NetworkPolicy; Conftest (introduced in this lecture as bonus, deep in L9) can gate that every new pod is covered by at least one policy
+
+---
+
+## 📍 Slide 16 – 🚦 Admission Control: The Gate Before Apply
 
 ```mermaid
-flowchart LR
-    subgraph "🔮 Future Security Stack"
-        AI[🤖 AI Detection]
-        ZeroTrust[🛡️ Zero Trust]
-        SBOM[📋 SBOM Tracking]
-        Workload[🔐 Workload Identity]
-    end
-    
-    Current[📦 Today's Containers] --> Future[🚀 Next-Gen Security]
-    
-    style Future fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#2c3e50
+sequenceDiagram
+    participant K as kubectl
+    participant A as kube-apiserver
+    participant P as Pod Security Admission
+    participant G as Gatekeeper / Kyverno
+
+    K->>A: kubectl apply -f deploy.yaml
+    A->>P: validate against PSS
+    P-->>A: ✅ or ❌
+    A->>G: validate against custom policies (Rego/Kyverno)
+    G-->>A: ✅ or ❌
+    A-->>K: created / rejected
 ```
 
-### 🛡️ Container Security Checklist
+| 🛠️ Admission control | 🎯 What it does | 🪜 Stage |
+|---|---|---|
+| **Pod Security Admission** | Built-in; enforces PSS levels | K8s 1.25+ |
+| **Gatekeeper (OPA)** | Rego policies as CRDs | Custom rules |
+| **Kyverno** | YAML policies as CRDs (no DSL learning) | Custom rules |
 
-#### 📦 **Container Images**
-- [ ] 🔍 Scan all images for vulnerabilities
-- [ ] 🏔️ Use minimal base images (Alpine/Distroless)  
-- [ ] 👤 Run as non-root user
-- [ ] 🔐 Sign images with Cosign
-- [ ] 📋 Generate SBOM for tracking
-
-#### ☸️ **Kubernetes Security**  
-- [ ] 🔑 Enable RBAC with least privilege
-- [ ] 🛡️ Apply Pod Security Standards
-- [ ] 🌐 Implement network policies (default-deny)
-- [ ] 📊 Enable audit logging
-- [ ] 🔐 Encrypt etcd at rest
-
-#### 🏃‍♂️ **Runtime Security**
-- [ ] 🦅 Deploy Falco for threat detection
-- [ ] 📈 Monitor resource usage anomalies  
-- [ ] 🚫 Block privileged containers
-- [ ] 📖 Enable read-only filesystems
-- [ ] 🔒 Use seccomp/AppArmor profiles
-
-#### 🔄 **CI/CD Pipeline**
-- [ ] 🔍 Scan images in pipeline
-- [ ] 🚫 Fail builds on critical CVEs
-- [ ] ✍️ Require signed commits/images
-- [ ] 🛡️ Validate security policies
-- [ ] 📊 Track security metrics
-
-### 📊 Security Maturity Levels
-
-| Level | Description | Focus |
-|-------|-------------|-------|
-| 🚀 **Level 1** | Basic security | Image scanning, RBAC |
-| 🛡️ **Level 2** | Defense in depth | Network policies, admission control |
-| 🏆 **Level 3** | Advanced security | Runtime protection, zero-trust |
-| 🔮 **Level 4** | Future-ready | AI detection, confidential computing |
-
-### 🎯 Key Takeaways
-
-1. **🔍 Scan everything** → images, configs, runtime behavior
-2. **🚫 Default deny** → network policies, RBAC, admission control  
-3. **👤 Least privilege** → non-root users, minimal permissions
-4. **📊 Monitor continuously** → logs, metrics, anomalies
-5. **🔄 Automate security** → policy-as-code, CI/CD integration
-6. **📚 Stay updated** → patches, CVEs, security practices
-7. **🎯 Plan for incidents** → detection, response, recovery
-8. **🛡️ Defense in depth** → multiple security layers
+* 🪜 **Gatekeeper uses Rego — same language as Conftest (L9) and KICS (L6).** Skills compound across the program
+* 🪜 **In Lab 7 Bonus** you'll preview Conftest as a CI-side gate (before apply), then Lab 9 covers full runtime admission
 
 ---
 
-## 🎉 Fun Break: "Container Security Evolution"
+## 📍 Slide 17 – 🪜 Common Mistakes & Fixes
 
-### 😅 **"The Security Maturity Journey"**
+| 🚨 Mistake | 🛠️ Fix |
+|---|---|
+| `FROM node:latest` (or `:18`, but no minor pin) | Pin to specific tag (e.g. `node:22.10.0-alpine3.20`); update via Renovate/Dependabot |
+| `USER root` (or no USER line) | `USER 65532` (numeric — K8s `runAsNonRoot` reads numeric only) |
+| Embedded secrets via `ARG`/`ENV` | Use external secret mount; never bake into image |
+| `default` ServiceAccount used by app pods | Create a dedicated SA per workload; `automountServiceAccountToken: false` unless needed |
+| `privileged: true` "just to make it work" | Diagnose what specific capability is needed; use `capabilities.add: [NET_BIND_SERVICE]` (or whatever) instead |
+| `image: myapp:latest` in K8s | Pin by digest `@sha256:...` — same lesson as L4 GHA pinning |
 
-```
-2015: "Containers are secure by default!" 😇
-2016: "Wait, they share the kernel..." 😰  
-2017: "Maybe we need some scanning..." 🔍
-2018: "Tesla got crypto-mined via K8s!" 😱
-2019: "RBAC ALL THE THINGS!" 🔐
-2020: "Supply chain is the new attack vector" 📦
-2024: "AI will solve container security" 🤖
-2025: "AI is the new attack vector" 🤖💀
-```
-
-### 🎭 **Security Reality Check:**
-
-```
-Security team: "We've implemented 47 security tools!"
-Developer: "My pod won't start..."
-Security team: "Working as intended!"
-Manager: "Why is our security budget so high?"
-Everyone: "..." 
-
-The eternal struggle continues... 😄
-```
-
-### 💡 **Container Security Wisdom:**
-
-```
-❌ "Security is someone else's job"
-✅ "Security is everyone's responsibility"
-
-❌ "We'll add security later"  
-✅ "Security is built-in from day one"
-
-❌ "Scanning once is enough"
-✅ "Continuous monitoring is essential"
-
-❌ "Default configs are fine"
-✅ "Harden everything by default"
-```
+* 🧠 Almost every container-security audit report ends with these six items. Get them right and you're ahead of 80% of orgs
 
 ---
 
-🔗 **Advanced Security Resources:**
-* [MITRE ATT&CK Containers](https://attack.mitre.org/matrices/enterprise/containers/)
-* [Kubernetes Security Checklist](https://kubernetes.io/docs/concepts/security/security-checklist/)
-* [CNCF Cloud Native Security Map](https://github.com/cncf/tag-security/blob/main/security-whitepaper/v2/CNCF_cloud-native-security-whitepaper-May2022-v2.pdf)
-* [Container Security Best Practices](https://kubernetes.io/docs/concepts/security/)
-* [Falco Community Rules](https://github.com/falcosecurity/rules)
+## 📍 Slide 18 – 🪜 Putting It Together in CI
+
+```yaml
+# .github/workflows/container-sec.yml (extends L4 + L5 + L6 patterns)
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # for OIDC if signing happens here (L8 preview)
+      packages: write
+    steps:
+      - uses: actions/checkout@b4ffde6...
+      - name: Build image
+        run: docker build -t ghcr.io/${{ github.repository }}:${{ github.sha }} .
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: 1        # fail PR on findings
+          format: sarif
+          output: trivy.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: trivy.sarif }
+      # K8s manifest scan
+      - name: Scan manifests (Trivy config)
+        run: trivy config ./k8s/ --severity HIGH,CRITICAL --exit-code 1
+```
+
+* 🪜 **The L4 lessons all apply:** pin by SHA, OIDC, least-privilege `permissions:`. The new part is the Trivy step
+* 🧠 Note: separate **image scan** (CVEs) and **manifest scan** (misconfig) — different output classes, both gated
 
 ---
+
+## 📍 Slide 19 – ⏭️ What's Next + Lab Preview
+
+* 🧪 **Lab 7** (this week):
+  * Task 1 (6 pts): Trivy image scan + Docker Bench on Juice Shop image; analyze CVE + misconfig findings
+  * Task 2 (4 pts): Harden a K8s deployment with PSS (`restricted`) + securityContext + NetworkPolicy
+  * Bonus (2 pts): Write a small **Policy-as-Code** rule (Conftest or Kyverno) that rejects pods missing `runAsNonRoot: true`
+* 🚀 **Lecture 8** (next week): **Software Supply Chain Security** — Cosign signs the Juice Shop image you've now hardened; we add provenance attestations and verify them at deploy
+
+---
+
+## 📍 Slide 20 – 📚 Resources & Takeaways
+
+**Books:**
+
+| 📖 Book | ✍️ Why |
+|---|---|
+| *Container Security* — Liz Rice (O'Reilly, 2020) | The canonical book; every chapter is gold; ch. 4–6 on isolation are critical |
+| *Hacking Kubernetes* — Andrew Martin & Michael Hausenblas (O'Reilly, 2021) | Attacker's perspective; the chapter on RBAC abuse is the strongest |
+| *Kubernetes Security and Observability* — Brendan Burns et al. (O'Reilly, 2021) | Defender's perspective; pairs perfectly with Liz Rice's book |
+
+**Talks & specs:**
+
+* 🎥 *"Container Security: It's All About Trust"* — Liz Rice, KubeCon EU 2020
+* 🎥 *"Leaky Vessels: runc Container Escape"* — Snyk team, RSA 2024
+* 📜 [NIST SP 800-190](https://csrc.nist.gov/publications/detail/sp/800-190/final) — Container Security Guide
+* 📜 [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/)
+* 📜 [Trivy Documentation](https://trivy.dev/)
+* 📜 [CIS Kubernetes Benchmark](https://www.cisecurity.org/benchmark/kubernetes)
+
+**Takeaways:**
+
+| # | 🧠 Insight |
+|---|---|
+| 1 | A container is a Linux process. Treat it like one: minimal privilege, no shell, read-only root. |
+| 2 | Trivy is your one-tool answer for image + config + secrets + cluster scanning. Wire it everywhere. |
+| 3 | PSS `restricted` should be the default for app namespaces. If `restricted` fails, the pod has questions to answer. |
+| 4 | Default-deny NetworkPolicy is to K8s what default-deny IAM is to AWS — the foundational discipline. |
+| 5 | runc-style runtime CVEs happen even with perfect images. Defense in depth at runtime (L9) is mandatory. |
+| 6 | One image, multiple scans (CVE + misconfig + secret). Don't conflate them. |
+
+> 💬 *"Containers don't contain. That's the most useful sentence in container security."* — Daniel J. Walsh (Red Hat), Linux Conf 2014.

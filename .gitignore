@@ -1,0 +1,30 @@
+# Instructor-only reference submissions (dry-run outputs, never on remote)
+refs/
+
+# Private keys — never commit anywhere
+*.key
+!labs/lab9/policies/*.key       # allow if a Rego policy ever ships with a fixture key
+
+# Bulk regenerable scratch outputs (per-lab spec says "do not commit").
+# These are large + regenerated each run; not student deliverables.
+labs/lab2/output/
+labs/lab2/output-*/
+labs/lab5/results/
+labs/lab5/semgrep/juice-shop/
+labs/lab6/results/
+labs/lab7/results/
+labs/lab8/results/
+labs/lab9/falco/logs/
+labs/lab10/work/dd/
+labs/lab11/logs/
+labs/lab11/reverse-proxy/certs/
+labs/lab12/results/
+
+# Standard
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+.venv/
+.DS_Store
+*.swp

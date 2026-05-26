@@ -1,758 +1,355 @@
-# 📌Lecture 3 - Secure Git & Secrets Management
-
-## 📍 Slide 1 – 🌍 Brief History of Git
-
-* 🧑‍💻 Git was created in **2005 by Linus Torvalds**, the same creator of the Linux kernel.
-* ⚡ It was designed after the **BitKeeper licensing dispute**, to give the Linux community a free and open source Version Control System (VCS).
-* 🛠️ Git quickly became popular due to its **speed, distributed nature, and branching model**.
-* 🌐 Today, **over 90% of open source projects** use Git as their primary VCS.
-* 🎉 Fun fact: Torvalds named Git after himself, calling it a “stupid content tracker.”
-
-```mermaid
-timeline
-    title Evolution of Git
-    2005 : Git created by Linus Torvalds
-    2008 : GitHub launched
-    2014 : GitLab released
-    2020 : GitHub acquired by Microsoft
-```
+# 📌 Lecture 3 — Secure Git: Signed Commits, Secret Scanning, and History Hygiene
 
 ---
 
-## 📍 Slide 2 – 🔐 Why Git Security is Important
+## 📍 Slide 1 – 🔓 The 296,000 Records Behind a Stray Commit
 
-* 🚨 **Repositories often contain sensitive data**: API keys, credentials, infrastructure details.
-* 🧩 Git commits are **permanent by design** — once pushed, removing sensitive data is very hard.
-* 🏢 Many breaches start with **leaked secrets in public repos** (attackers scan GitHub constantly).
-* 📈 Reports show **millions of secrets** are leaked yearly in public repositories.
-* 🛡️ Ensuring security in Git workflows is a **core practice in DevSecOps**.
+* 🗓️ **October 2022** — Toyota discloses a 5-year leak: an access key for the **T-Connect** customer service backend was pushed to a **public GitHub repo by a development partner in December 2017**
+* 🪜 Nobody noticed. The key sat there for almost five years. **296,019 customer records** (email + management number) accessed
+* 🧠 Toyota's response: rotate keys, public apology, and *promise* to scan repos
+* 🪜 None of the controls needed were exotic — every one of them lives in this lecture: signed commits (audit trail), pre-commit secret scan (would have caught it pre-push), org-level secret scanning (would have caught it post-push)
+* 💸 The whole 5-year exposure could have been prevented by a **30-line `.gitleaks.toml` and a 2-line pre-commit hook**
 
-```mermaid
-graph LR
-    A[Developer] --> B[Git Repository]
-    B --> C[Public Exposure]
-    C --> D[Attackers Scan]
-    D --> E[Secrets Compromised]
-```
+> 🤔 **Think:** Recall from Lecture 2 that *Repudiation* is the R in STRIDE. If someone pushes a malicious commit using your name, how do you prove it wasn't you? That's what commit signing solves.
 
 ---
 
-## 📍 Slide 3 – 🗃️ Version Control System (VCS) Basics Recap
+## 📍 Slide 2 – 🎯 Learning Outcomes
 
-* 📦 **Version Control System (VCS)** tracks changes in files, enabling collaboration.
-* 🧑‍🤝‍🧑 Developers can **work in parallel** without overwriting each other’s work.
-* 🔄 Git supports **branching and merging**, essential for modern workflows.
-* 🛠️ Examples of VCS: **SVN (Subversion), Mercurial, Git**.
-* 🚀 Git dominates due to **speed, distributed nature, and strong community**.
-
-```mermaid
-flowchart LR
-    Dev1 -->|Commit| Repo
-    Dev2 -->|Commit| Repo
-    Repo -->|Merge| Main
-```
+| # | 🎓 Outcome |
+|---|-----------|
+| 1 | ✅ Explain commit signing as a non-repudiation control, not just a green checkmark |
+| 2 | ✅ Compare GPG vs SSH commit signing and choose the right one |
+| 3 | ✅ Configure your local Git to sign every commit by default |
+| 4 | ✅ Run **gitleaks** as a pre-commit hook and read its findings |
+| 5 | ✅ Rewrite history with `git filter-repo` to purge a leaked secret correctly |
 
 ---
 
-## 📍 Slide 4 – 🚨 Common Git-Related Security Incidents
-
-* ❌ Developers accidentally commit **API keys, SSH keys, cloud tokens**.
-* 📜 Sensitive files like `.env`, `config.json`, or database dumps are pushed.
-* 🌍 Attackers monitor GitHub in real time for newly leaked credentials.
-* 🏴‍☠️ Breaches:
-
-  * Uber 2016 — AWS keys leaked in GitHub, attackers accessed millions of records.
-  * Toyota 2022 — API keys exposed, leading to customer data risk.
-* ⚡ Lesson: **Git is powerful, but careless usage leads to security disasters**.
+## 📍 Slide 3 – 🗺️ Where Lecture 3 Sits
 
 ```mermaid
 graph LR
-    A[Developer Commits Secrets] --> B[GitHub Public Repo]
-    B --> C[Real-Time Scanners]
-    C --> D[Attacker Finds Secret]
-    D --> E[Data Breach]
+    L1["🏛️ L1<br/>DevSecOps culture"] --> L3
+    L2["🎯 L2<br/>Threat model"] -.identifies.-> L3["🔐 L3<br/>Secure Git (here)"]
+    L3 --> L4["🚀 L4<br/>CI/CD"]
+    L3 -.feeds.-> L8["🔏 L8<br/>Supply chain"]
+
+    style L3 fill:#FF9800,color:#fff
 ```
+
+* 🪜 **Building on L2:** STRIDE-R (non-repudiation) and STRIDE-S (spoofing) both have Git-layer controls — this lecture implements them
+* 🎯 **Lab 3 alignment:** Task 1 configures SSH commit signing + verifies provenance; Task 2 wires gitleaks into pre-commit; Bonus rewrites history with filter-repo to purge a planted secret
 
 ---
 
-## 📍 Slide 5 – 🧾 Commit Identity Basics
+## 📍 Slide 4 – 🪪 What Commit Signing Actually Proves
 
-* 🧑 Every Git commit contains **author information**: name & email.
-* 🧑‍💻 The **committer** may differ from the author (e.g., when applying patches).
-* 🖊️ This identity is only text metadata, so it can be **spoofed easily**.
-* ⚠️ Without additional verification, **attackers could impersonate contributors**.
-* ✅ Secure workflows use **signed commits** to prove authenticity.
+> 💬 *"A commit is an unverified claim about who made a change."* — paraphrasing the Git documentation. Signing turns the claim into evidence.
 
-```mermaid
-sequenceDiagram
-    participant Dev as Developer
-    participant Repo as Git Repo
-    Dev->>Repo: Commit with Name + Email
-    Note over Repo: Identity not verified<br/>Can be faked
-```
+| 🏷️ Property | ❌ Unsigned commit | ✅ Signed commit |
+|---|---|---|
+| Author name & email | Trivially forged (`git -c user.name=...`) | Same — strings still trivially settable |
+| **But:** can we prove the commit was made by the key-owner? | No | Yes — cryptographic signature |
+| Audit trail for incident response | "Some commit claims Alice wrote it" | "Alice's key signed this; either Alice signed it or her key is compromised" |
+
+* 🪜 **Signing protects against repudiation, not against identity confusion.** The display name can still say anything. The signature is the proof
+* 🧠 **GitHub shows "Verified" only if** the signing key is uploaded to GitHub under the matching account. Otherwise you get "Unverified" — the commit is signed but GitHub can't tell whose key it is
 
 ---
 
-## 📍 Slide 6 – 🖊️ Signed Commits Explained
+## 📍 Slide 5 – 🪪 GPG vs SSH Commit Signing
 
-* 🛡️ **Signed commits** use cryptographic keys to prove authenticity.
-* 🔑 A commit includes a **digital signature** that can be verified.
-* 🏷️ GitHub and GitLab display a “✔ Verified” badge for signed commits.
-* ⚠️ Unsigned commits may be flagged as **unverified**, reducing trust.
-* 📖 Fun fact: Some open source projects only accept **signed commits** in pull requests.
+* 🪜 Git has supported **GPG signing since 2009**. SSH-key signing was added in **Git 2.34 (November 2021)** and rolled out to GitHub for verification in **August 2022**
+* 🆚 Which to use?
 
-```mermaid
-flowchart LR
-    Dev[Developer Key] -->|Sign Commit| Commit[Git Commit]
-    Commit --> Repo[Remote Repo]
-    Repo -->|Verify Signature| Trust[✔ Verified Commit]
-```
+| 🏷️ Aspect | 🔐 GPG | 🪪 SSH |
+|---|---|---|
+| Key infrastructure | Separate keypair, manage with `gpg` | Reuses your existing SSH key |
+| Key management | Web-of-trust, keyservers | Your `~/.ssh/` directory + GitHub upload |
+| Linux ecosystem | Native everywhere | Native everywhere |
+| Hardware token | YubiKey via gpg-agent | YubiKey via ssh-agent (FIDO/U2F) |
+| GitHub support | Since 2016 | Since August 2022 |
+| Beginner friction | High (key gen + trust setup) | Low (you already have a key) |
 
----
-
-## 📍 Slide 7 – 🔑 PGP/GPG Keys in Git
-
-* 🔒 **GPG (GNU Privacy Guard)** implements **Pretty Good Privacy (PGP)** encryption.
-* 🗝️ Developers generate a **GPG key pair** (public + private keys).
-* ✍️ Private key signs commits → Public key verifies authenticity.
-* 🧩 Requires setting up Git to use GPG keys for signing.
-* 🏢 Many enterprises enforce **GPG-signed commits** for compliance.
-
-```mermaid
-graph LR
-    A[Developer Private Key] -->|Signs Commit| B[Signed Commit]
-    B --> C[Public Repo]
-    C --> D[Other Developers]
-    D -->|Verify with Public Key| E[Trust Commit]
-```
+* 🪜 **In this course we use SSH signing** for Task 1: zero new infrastructure, same key you push with, GitHub verifies. GPG is fully fine; just heavier
+* 🧠 Most cloud-native teams (CNCF projects, the Go core, Kubernetes) moved to SSH signing in 2023–2024
 
 ---
 
-## 📍 Slide 8 – 🪪 SSH Signing of Commits
+## 📍 Slide 6 – 🪛 Configuring SSH Signing in 4 Commands
 
-* 🔑 **SSH keys** (commonly used for repo access) can also sign commits.
-* 🚀 Simpler setup than GPG — many developers already have SSH keys.
-* 🛡️ Supported by Git 2.34+ and major platforms like GitHub.
-* 🏢 Organizations can enforce **SSH-signed commits** at repository level.
-* ⚖️ Comparison: SSH signing is **lighter** but less flexible than GPG.
+```bash
+# 1. Tell Git to use SSH for signing
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
 
-```mermaid
-flowchart LR
-    DevKey[SSH Private Key] -->|Sign Commit| Commit[Commit with SSH Sig]
-    Commit --> Repo[GitHub/GitLab]
-    Repo -->|Verify SSH Key| Verified[✔ Verified Badge]
+# 2. Sign every commit by default
+git config --global commit.gpgsign true
+git config --global tag.gpgsign true
+
+# 3. Optional but recommended: local verification
+git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
+echo "you@example.com namespaces=\"git\" $(cat ~/.ssh/id_ed25519.pub)" \
+  >> ~/.config/git/allowed_signers
+
+# 4. Upload the same .pub to GitHub → Settings → SSH and GPG keys
+#    → Add new → choose 'Signing Key' (not 'Authentication Key')
 ```
 
----
-## 📍 Slide 9 – 🛡️ Verification of Commits in Platforms
-
-* 🏢 GitHub, GitLab, and Bitbucket display commit signatures with badges.
-* ✔️ A **green “Verified” label** means the signature matches a trusted key.
-* ⚠️ A **yellow “Unverified” label** means signature exists but cannot be trusted.
-* ❌ A **red “Bad signature” label** indicates possible tampering.
-* 📊 Organizations can set policies to reject unverified commits in pull requests.
-
-```mermaid
-flowchart LR
-    Commit[Signed Commit] -->|Push| Repo[GitHub/GitLab/Bitbucket]
-    Repo -->|Validate Signature| Result
-    Result -->|✔| Verified[Verified Badge]
-    Result -->|⚠| Unverified[Unverified]
-    Result -->|❌| Tampered[Bad Signature]
-```
+* 🧠 The **`Signing Key` vs `Authentication Key`** distinction matters — same key bytes, two different roles. GitHub will show "Verified" only if you uploaded as **Signing**
+* 🛠️ Local verification via `allowed_signers` means `git log --show-signature` will print "Good signature" — even offline
 
 ---
 
-## 📍 Slide 10 – ⚖️ GPG vs SSH Commit Signing
+## 📍 Slide 7 – 🏢 Enforcing Signatures on the Server
 
-* 🔑 **GPG (GNU Privacy Guard)**
+* 📜 **Branch protection rules** in GitHub let you set "**Require signed commits**" — unsigned pushes are rejected
+* 🪜 **Required for:**
+  * `main` / `release/*` (always)
+  * `production` branches in regulated environments
+* 🪜 **Trade-off:** every contributor has to configure signing. The OWASP Security Champion (Lecture 1) usually owns the rollout
+* 🧠 Once enforced, the audit trail in `git log --show-signature` becomes evidence — the compliance team will ask for it during SOC 2 / ISO 27001 review (Lecture 9 covers the frameworks)
 
-  * ✅ Flexible, widely supported, strong cryptography.
-  * ❌ Setup is complex, key management can be hard for beginners.
-* 🪪 **SSH Signing**
+> 💬 *"A 'Verified' badge on every commit is the cheapest non-repudiation control a software org can ship."* — paraphrased from the GitHub security engineering blog (2023)
 
-  * ✅ Easier setup, uses existing SSH keys.
-  * ❌ Less flexible, limited to Git commit signing.
-* 🧩 Many developers prefer SSH for convenience, but enterprises lean on GPG for compliance.
-* 📖 Fun fact: Some projects allow **both GPG and SSH signatures** depending on contributor level.
+---
+
+## 📍 Slide 8 – 🗝️ How Secrets End Up in Git
+
+* 🚦 The four classic patterns (every one of them is in OWASP Top 10:2025 A03 *Cryptographic Failures*):
+  1. **Hardcoded** — `password = "admin123"` in a config file
+  2. **Forgotten committed** — `aws-credentials.json` left in repo root
+  3. **Pasted into history** — debugging session, never cleaned up
+  4. **Leaked into logs** — Cloud Function prints env vars on error
+
+* 📊 **GitGuardian's 2024 State of Secrets Sprawl** counted **23.8 million secrets** leaked across public GitHub in 2023 alone
+* 🪜 **The killer property:** Git **never forgets**. Deleting a file in the next commit leaves the secret in `git log -p` forever. This is why rotation > deletion
+
+---
+
+## 📍 Slide 9 – 🔍 The Secret-Scanner Field
 
 ```mermaid
 graph TB
-    A[GPG Signing] -->|Pros: Strong, Flexible| C[Trust]
-    A -->|Cons: Complex Setup| D[Barriers]
-    B[SSH Signing] -->|Pros: Easy Setup| C
-    B -->|Cons: Limited Scope| D
+    SS[🔍 Secret scanners]
+    SS --> GL[Gitleaks<br/>Go, regex<br/>MIT, fast]
+    SS --> TH[TruffleHog<br/>Go, regex + verify<br/>AGPL-3.0]
+    SS --> GS[git-secrets<br/>AWS Labs<br/>shell, basic]
+    SS --> GG[GitGuardian<br/>SaaS, 800+ detectors<br/>free tier]
+    SS --> GHN[GitHub Secret Scanning<br/>org-native<br/>free for public repos]
+
+    style GL fill:#4CAF50,color:#fff
+    style TH fill:#2196F3,color:#fff
+    style GHN fill:#9C27B0,color:#fff
 ```
+
+| 🔍 Tool | 🎯 Best for | 🚦 Catch |
+|---|---|---|
+| **gitleaks** | Pre-commit hooks (sub-second on most repos) | Pure regex — fast, no network |
+| **TruffleHog** | CI/CD scanning + **live verification** (does the secret still work?) | 800+ secret types, AGPL — same family of regex but with verifiers |
+| **GitHub Secret Scanning** | Org-wide, post-push, partner-verified secrets (AWS, Stripe, etc.) | Free for public repos; **Advanced Security** for private |
+| **git-secrets** (AWS Labs) | Lightweight; AWS-focused; predates the others | Limited rule set; still useful for `aws_access_key_id` style finds |
+
+* 🪜 **In this course:** gitleaks for pre-commit (Lab 3 Task 2) + TruffleHog optional in CI (mentioned, not required)
 
 ---
 
-## 📍 Slide 11 – 🏢 Organizational Enforcement of Signed Commits
+## 📍 Slide 10 – ⚡ Gitleaks in 60 Seconds
 
-* 🛡️ Enterprises can **enforce signed commits** across repos.
-* ⚙️ Platforms like GitHub/GitLab have repository settings to **reject unsigned commits**.
-* 🚧 Helps prevent impersonation and ensures accountability.
-* 🧑‍🤝‍🧑 Promotes **trust in collaborative environments**.
-* 📜 Compliance: Aligns with standards like **ISO 27001** and **SOC2**.
+```bash
+# Install once (Go binary)
+brew install gitleaks         # or: docker run zricethezav/gitleaks
+gitleaks --version            # course pins v8.x (April 2026 stable)
 
-```mermaid
-flowchart LR
-    Dev[Developer] -->|Unsigned Commit| Repo[Company Repo]
-    Repo -->|Rejected| Redo
-    Dev -->|Signed Commit| Repo
-    Repo -->|Accepted| Done
+# Scan working tree (no Git history)
+gitleaks dir .
+
+# Scan full history (slower but catches forgotten commits)
+gitleaks git .
+
+# Pre-commit hook output (this is what you'll add in Lab 3)
+gitleaks protect --staged --redact
 ```
+
+| 🚨 Subcommand | 🎯 When to use |
+|---|---|
+| `protect` | Pre-commit — scans staged changes only |
+| `dir` | Pre-push — fast directory scan |
+| `git` | CI nightly — full history audit |
+
+* 🧠 Gitleaks is **regex + entropy** — it detects high-entropy strings even without a known prefix. False positives are normal; tune via `.gitleaks.toml`
+* 🪜 Course pins **gitleaks v8.x** (latest stable as of April 2026)
 
 ---
 
-## 📍 Slide 12 – ❌ What Are “Secrets”?
+## 📍 Slide 11 – 🪝 Pre-Commit Hooks: The Right Place to Catch It
 
-* 🔑 **Secrets** are sensitive values used by applications to authenticate or authorize:
+> 💬 *"The cheapest place to fail is on the developer's laptop, before the push."* — Bruce Schneier's economics applied to Git
 
-  * API keys
-  * Database credentials
-  * SSH private keys
-  * Cloud provider tokens
-* 📦 Secrets are as critical as passwords — if exposed, attackers gain access to systems.
-* ⚡ Fun fact: Many leaks are due to developers **copy-pasting keys for quick testing**.
+* 🪜 **The pre-commit framework** (`pre-commit.com`, Anthony Sottile, 2017) standardizes hooks: declarative `.pre-commit-config.yaml`, language-agnostic
+* 🪜 **Why it matters:** without a framework, each developer would `cp .git/hooks/...` manually — fragile, non-shareable
 
-```mermaid
-graph TD
-    App[Application] -->|Uses| Secret[API Key / Token / Password]
-    Secret --> Cloud[Cloud Service]
-    Secret --> DB[Database]
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
 ```
+
+* 🧠 Pre-commit hooks are **opt-in per dev** by default. The reliable approach: pair pre-commit with **CI re-scan** (Lecture 4) — defense in depth
 
 ---
 
-## 📍 Slide 13 – 🔓 How Secrets Leak into Git Repositories
+## 📍 Slide 12 – 🧹 When the Secret Already Shipped: History Rewrite
 
-* 📂 Committing `.env` or `config.json` files with credentials.
-* 🧑‍💻 Copy-pasting tokens directly into source code.
-* 🔁 Using test credentials but forgetting to remove them.
-* 📦 Uploading entire folders without `.gitignore` filters.
-* ⚠️ Once pushed, **history preserves the secret forever**.
+You **must** rewrite history when:
+* 🪪 A credential is in Git history (current commits or past)
+* ⚠️ You can't just delete the file — `git log -p` still shows it
 
-```mermaid
-flowchart LR
-    Dev[Developer] -->|Commit| Repo[Git Repo]
-    Repo -->|Contains Secrets| History[Permanent Git History]
-    History --> Attacker[Malicious Actor Finds Secret]
-```
+| 🛠️ Tool | 📅 Era | 🪜 Status |
+|---|---|---|
+| `git filter-branch` | Built-in, since 2007 | ⚠️ Deprecated since Git 2.22 (2019) — slow, race-prone |
+| **`git filter-repo`** | Python, by Elijah Newren (Git maintainer), 2018 | ✅ Current recommended tool |
+| **BFG Repo Cleaner** | Java, by Roberto Tyley, 2012 | ✅ Faster for large repos, slightly less flexible |
 
----
-
-## 📍 Slide 14 – 📂 Examples of Leaked Secrets in Public Repos
-
-* 🚨 High-profile incidents:
-
-  * Uber (2016): AWS keys leaked, attackers accessed 57M records.
-  * Toyota (2022): Hardcoded API keys exposed, customer data at risk.
-  * GitHub (2021): Dozens of companies had internal tokens leaked.
-* 📊 Studies show **thousands of new secrets** appear in public GitHub repos daily.
-* 🧩 Attackers use **real-time scanners** to catch leaked keys within minutes.
-* 🏴‍☠️ Secrets are often sold on dark web forums.
-
-```mermaid
-timeline
-    title Leaked Secrets Incidents
-    2016 : Uber AWS Keys Leak
-    2021 : GitHub Tokens Leak
-    2022 : Toyota API Keys Leak
-```
-
----
-## 📍 Slide 15 – 📉 Impact of Secret Leaks
-
-* 🚨 Attackers can gain **direct access to cloud services, databases, or APIs**.
-* 💸 Financial impact: breaches often lead to **fines, lawsuits, and lost revenue**.
-* 🕵️ Secrets may be used in **supply-chain attacks** (injecting malicious code).
-* 🌍 Data breaches can expose **millions of user records**.
-* 🏴‍☠️ Attackers sometimes don’t exploit directly but **sell secrets on black markets**.
-* 📊 Fun fact: Average cost of a secret-related breach is **over \$4M (IBM 2023 study)**.
-
-```mermaid
-graph TD
-    Secret[Leaked Secret] --> Cloud[Cloud Service]
-    Secret --> DB[Database]
-    Secret --> API[Third-party API]
-    Cloud --> Attack[Data Breach]
-    DB --> Attack
-    API --> Attack
-```
+* 🪜 **Critical**: rewriting history changes commit hashes. Everyone with an existing clone must re-clone or rebase. **Coordinate with the team before pushing.**
+* 🚨 **Rotation > rewriting.** The secret has been on the public internet; assume it's been scraped. Rewrite to clean up; **rotate to actually secure.**
 
 ---
 
-## 📍 Slide 16 – ⚠️ Why Deleting from Git History Is Not Enough
+## 📍 Slide 13 – 🧹 filter-repo in Practice
 
-* 🗂️ Git keeps **full history of commits**, even if files are removed later.
-* 🧩 A leaked key in an old commit can still be retrieved with `git log`.
-* 📥 Attackers may already have **cloned the repo** before deletion.
-* 🧹 Cleaning requires **rewriting history** with tools like `git filter-repo` or **BFG Repo-Cleaner**.
-* 🚧 Even after cleaning, copies may exist in **forks or caches**.
+```bash
+# Install
+pip install git-filter-repo                   # course pins v2.45+
 
-```mermaid
-flowchart LR
-    A[Commit with Secret] --> B[Removed in New Commit]
-    B --> C[Still in History]
-    C --> D[Attacker Recovers Key]
+# Always work on a fresh clone (filter-repo refuses dirty repos)
+git clone https://github.com/you/repo.git repo-clean
+cd repo-clean
+
+# Replace a leaked AWS key with [REDACTED] across all history
+echo 'AKIAIOSFODNN7EXAMPLE==>[REDACTED]' > /tmp/replacements.txt
+git filter-repo --replace-text /tmp/replacements.txt
+
+# Push the rewritten history (will force-push automatically)
+git remote add origin git@github.com:you/repo.git
+git push --force --all
+git push --force --tags
+
+# THEN rotate the actual AWS key — the rewrite alone doesn't help
 ```
+
+* 🧠 The **bonus task** in Lab 3 does exactly this on a small repo with a planted fake key — safe to experiment
 
 ---
 
-## 📍 Slide 17 – 🔍 Manual vs Automated Secret Scanning
+## 📍 Slide 14 – 🪪 Identity Beyond Commit: Signed Tags & Releases
 
-* 🧑 **Manual review**: developers scanning code before pushing.
+* 🏷️ Same `gpg.format = ssh` config makes **tags** signable: `git tag -s v1.0.0`
+* 📦 Signed tags matter for **release authenticity** — the artifact you sign in Lecture 8 (Cosign) is usually built from a signed tag
+* 🪜 **Reproducible signing chain you'll build in this course:**
+  * **L3** — sign commits + tags
+  * **L4** — CI gates on signed commits
+  * **L8** — sign the built artifact (image, SBOM, provenance) with Cosign
+  * **L9** — verify signatures at deploy + runtime
 
-  * ✅ Good for awareness, but ❌ prone to human error.
-* ⚙️ **Automated scanning**: tools detect secrets during commit or CI/CD pipeline.
-
-  * ✅ Scales across teams, ❌ may generate false positives.
-* 📦 Best practice: use **both manual awareness and automated scanning**.
-* 📊 Fun fact: Some attackers run their own **secret scanners** across GitHub 24/7.
-
-```mermaid
-graph LR
-    Dev[Developer] -->|Commit| Repo
-    Repo -->|Manual Review| Human[Developer Reviews]
-    Repo -->|Automated Scanning| Tool[Scanner]
-    Tool -->|Alerts| Dev
-```
+* 🪜 Each link is cheap on its own; together they form the supply-chain provenance backbone
 
 ---
 
-## 📍 Slide 18 – 🛠️ GitGuardian for Secret Scanning
+## 📍 Slide 15 – 🔬 Case Study: Uber's S3 Bucket Keys (2016)
 
-* 🧭 **GitGuardian** scans repositories in real time for exposed secrets.
-* 🔑 Detects API keys, tokens, and sensitive patterns in code.
-* 📊 Provides dashboards with statistics, incident history, and alerts.
-* 🛡️ Used by enterprises to **monitor both private and public repos**.
-* ⚡ Fun fact: GitGuardian’s research shows **millions of secrets leaked yearly**.
-
-```mermaid
-graph TD
-    Repo[Git Repository] --> GG[GitGuardian Scanner]
-    GG -->|Detects| Secret[API Key Found]
-    GG -->|Alert| SecurityTeam[Security Team]
-```
+* 🗓️ **October 2016** — attackers find AWS credentials in a **private GitHub repo** belonging to Uber engineers (Uber later paid the attackers $100k under an "bug bounty" agreement that violated breach notification laws)
+* 💾 Credentials gave access to an S3 bucket containing **57 million driver + rider records**
+* 🧠 The credentials were in a private repo — *but private isn't the same as scanned*. If a single contributor's account is compromised, every secret in every private repo they touched is exfiltrated
+* 🪜 **Controls that would have helped:** secret scanning on the private repo, **pre-commit hook** to prevent the original commit, **short-lived IAM credentials** instead of long-lived access keys (Lecture 6 covers this in IaC)
 
 ---
 
-## 📍 Slide 19 – 🛠️ TruffleHog for Secret Scanning
+## 📍 Slide 16 – 🔬 Case Study: Codecov Bash Uploader (2021)
 
-* 🐷 **TruffleHog** searches Git history for secrets and high-entropy strings.
-* 🕵️ Supports scanning entire repos, branches, and commits.
-* 🔑 Finds both **hardcoded keys** and **high-risk random strings**.
-* 🧩 Integrates into CI/CD workflows for continuous scanning.
-* 🏆 Popular in open source communities and DevSecOps pipelines.
+* 🗓️ **April 15, 2021** — Codecov discloses that attackers altered the `bash` uploader script (downloaded by `curl | bash` in thousands of CI pipelines) to **exfiltrate environment variables**
+* 🌍 Affected: HashiCorp, Twilio, Mozilla, Rapid7, Linux Foundation, GoDaddy — anyone uploading coverage via the script
+* 🧠 **Two intertwined lessons:**
+  * **For Git/secrets (this lecture):** secrets in CI env vars are first-class secrets and need rotation too
+  * **For supply chain (Lecture 8):** signing/verification of `bash` scripts pulled into CI matters as much as signing your own artifacts
 
-```mermaid
-graph LR
-    Repo[Git Repo History] --> TH[TruffleHog]
-    TH -->|Finds Secrets| Alert[Warning Raised]
-```
+* 🪜 The fix that mattered: rotate every secret that ever appeared in a Codecov-using CI pipeline. The fix that *should* have been in place: signed `curl | bash` payloads (Cosign blob signing — Lab 8 Bonus)
 
 ---
 
-## 📍 Slide 20 – 🛠️ Gitleaks for Secret Scanning
+## 📍 Slide 17 – 🧠 Common Mistakes & Fixes
 
-* 🔎 **Gitleaks** is a fast, open-source tool for scanning repos for secrets.
-* ⚡ Can be integrated as a **pre-commit hook** or in CI/CD pipelines.
-* 🧩 Uses regex + entropy detection to catch secrets in commits.
-* 🛡️ Lightweight and easy to configure with custom rules.
-* 🏢 Adopted by companies to enforce **“no secret in repo” policies**.
-
-```mermaid
-flowchart TD
-    Dev[Developer Commit] --> GL[Gitleaks Scanner]
-    GL -->|Detects Secret| Block[Commit Blocked]
-    GL -->|No Secret| Allowed[Commit Allowed]
-```
-
----
-## 📍 Slide 21 – 📦 Built-in Scanners in Git Platforms
-
-* 🛡️ **GitHub Secret Scanning** automatically detects common tokens (AWS, Azure, Slack, etc.).
-* 🏗️ **GitLab Secret Detection** integrates into CI pipelines for scanning commits and merge requests.
-* 📊 **Bitbucket** offers integrations with security tools for secret scanning.
-* 📬 Many providers partner with **cloud vendors** (e.g., AWS, GCP) to automatically revoke exposed tokens.
-* ⚡ Fun fact: GitHub scans **all public repos by default** for leaked secrets.
-
-```mermaid
-graph TD
-    Repo[Repository] --> GitHub[GitHub Secret Scanning]
-    Repo --> GitLab[GitLab Secret Detection]
-    Repo --> Bitbucket[Bitbucket Security]
-    GitHub -->|Alert| Dev[Developer]
-    GitLab -->|Alert| Dev
-    Bitbucket -->|Alert| Dev
-```
+| 🚨 Mistake | 🛠️ Fix |
+|---|---|
+| `.env` committed once and then `.gitignore`-d | History rewrite + rotate secret. Adding it to `.gitignore` *now* doesn't remove it from history |
+| "I'll just delete the commit" | `git reset --hard HEAD~1` doesn't delete remote — and doesn't touch any other branch where the commit landed |
+| Pre-commit hook installed, but new dev didn't run `pre-commit install` | Add `pre-commit install` to your repo bootstrap script; CI re-scans as fallback |
+| "We have GitHub Secret Scanning, we're safe" | GHSS catches **partner-verified** secrets (AWS, Stripe, etc.). Generic high-entropy strings: gitleaks or TruffleHog |
+| Signed commits but unverified branch protection | `Require signed commits` must be set in the branch protection rule — otherwise unsigned commits can still merge |
 
 ---
 
-## 📍 Slide 22 – 📊 Stats & Trends of Secret Leaks
+## 📍 Slide 18 – 🪪 Organizational Habits That Scale
 
-* 📈 Research shows **over 10M secrets** leaked in public repos annually.
-* 🏴‍☠️ Leaks increased by **60% year-over-year** due to cloud adoption.
-* 📊 Most common leaks: **cloud API keys (AWS, Azure, GCP)** and **database credentials**.
-* 🧑‍💻 Attackers often exploit secrets **within minutes** of exposure.
-* 🛠️ Enterprises increasingly integrate **automated detection + revocation** systems.
-* 🎉 Fun fact: GitHub found that **90% of repos with leaked secrets** belonged to individuals, not companies.
-
-```mermaid
-pie
-    title Secret Types Leaked
-    "Cloud API Keys" : 45
-    "Database Credentials" : 25
-    "SSH Keys" : 15
-    "Other Tokens" : 15
-```
+* 🧪 **Patterns that work** (from public security engineering blogs at GitHub, Mozilla, Datadog, Shopify):
+  1. **Onboarding script** installs pre-commit + configures signing in one command
+  2. **`main` branch** has *Require signed commits* + *Require pull request* turned on
+  3. **GHSS + a custom pattern rule** for any company-internal secret format (e.g. `MYCO_TOKEN_*`)
+  4. **Secret rotation runbook** documented before any incident — when (not if) a leak happens, the team knows what to do at 2am
+* 🚫 **Anti-patterns:**
+  * "We trust our devs" (the threat model in Lecture 2 includes insider mistakes, not malice)
+  * Secret-scanning enabled but no-one reads the alerts (Target 2013 — same failure mode at a different layer)
 
 ---
 
-## 📍 Slide 23 – 🧰 History of Secret Storage
+## 📍 Slide 19 – ⏭️ What's Next + Lab Preview
 
-* 📜 Early days: developers stored secrets in **plain text config files**.
-* 📂 Later: secrets were placed in **environment variables** (`.env` files).
-* 🔑 With cloud adoption, **vaulting systems** emerged for centralized management.
-* 🏗️ Now: dynamic secrets and **short-lived credentials** are becoming standard.
-* 🌍 Trend: secrets are moving away from code repos → into **dedicated secret managers**.
+* 🧪 **Lab 3** (this week):
+  * Task 1 (6 pts): Configure SSH commit signing; verify with `git log --show-signature` and on GitHub
+  * Task 2 (4 pts): Install pre-commit + gitleaks; plant a fake secret; observe the hook stopping the commit
+  * Bonus (2 pts): Rewrite history with `git filter-repo` to purge a planted secret across all commits
+* 🚀 **Lecture 4** (next week): **CI/CD Security & Build Hardening** — we extend pre-commit hooks into pipeline gates, add SBOM generation, and start treating the pipeline itself as an attackable system
 
-```mermaid
-timeline
-    title Secret Storage Evolution
-    1990s : Plaintext Config Files
-    2000s : Environment Variables
-    2010s : Vaulting Solutions
-    2020s : Dynamic & Ephemeral Secrets
-```
+> 💬 *"Trust is built in droplets and lost in bucketloads."* — Kevin Mitnick. Applies to Git history as much as to interpersonal trust.
 
 ---
 
-## 📍 Slide 24 – 🔑 Environment Variables for Secrets
-
-* 📦 Common practice: store secrets in `.env` files and load them into apps.
-* ✅ Pros: simple, supported by most frameworks, easy to override.
-* ❌ Cons: risk of committing `.env` into Git, poor lifecycle management.
-* 🛡️ Must be combined with `.gitignore` to prevent accidental commits.
-* 🎉 Fun fact: `.env` file practice became popular with **12-Factor App methodology**.
-
-```mermaid
-flowchart TD
-    EnvFile[.env File] --> App[Application]
-    App --> Service[Database / API / Cloud]
-```
-
----
-
-## 📍 Slide 25 – 📜 Config Files & .gitignore
-
-* 📝 Secrets often live in config files (`config.yaml`, `settings.json`).
-* 🚨 Danger: config files can be accidentally committed to repos.
-* 🛡️ Best practice: add them to `.gitignore` to keep them out of Git.
-* ⚙️ Example `.gitignore` entry:
-
-  ```bash
-  # Ignore environment config
-  .env
-  config/*.json
-  secrets/*
-  ```
-* 🎉 Fun fact: In 2013, a researcher found **thousands of AWS keys** in GitHub due to config file commits.
-
-```mermaid
-graph LR
-    Dev[Developer] --> Config[Config File with Secrets]
-    Config --> Repo[Git Repository]
-    Repo -->|Ignored by .gitignore| Safe[Secrets Not Committed]
-```
-
----
-
-## 📍 Slide 26 – 🛡️ Secrets Vaulting Tools Overview
-
-* 🧰 Secrets vaulting = **dedicated tools for secure secret storage & retrieval**.
-* 🔑 Examples:
-
-  * **HashiCorp Vault** (open-source, dynamic secrets)
-  * **AWS Secrets Manager** (cloud-native integration)
-  * **Azure Key Vault** (tight integration with Microsoft ecosystem)
-  * **GCP Secret Manager** (Google Cloud-native)
-* ⚡ Features: centralized storage, auditing, rotation, fine-grained access.
-* 🌍 Trend: moving from **static to dynamic, short-lived secrets**.
-
-```mermaid
-flowchart TD
-    Vault[Secrets Vault] -->|Provide Secrets| App[Application]
-    Vault --> Audit[Audit Logs]
-    Vault --> Rotate[Secret Rotation]
-    App --> Service[Cloud Service / DB]
-```
-
----
-## 📍 Slide 27 – ⚡ Secret Rotation & Lifecycle Management
-
-* 🔄 **Secret rotation** = replacing secrets regularly to reduce exposure risk.
-* 🛠️ Automated rotation is supported by tools like **AWS Secrets Manager** and **HashiCorp Vault**.
-* 📅 Rotation can be scheduled (e.g., every 30 days) or triggered by incidents.
-* 🛡️ Benefits: limits attacker window, improves compliance.
-* ⚠️ Challenge: updating dependent applications without downtime.
-* 🎉 Fun fact: Netflix rotates certain service keys **every few hours**.
-
-```mermaid
-sequenceDiagram
-    participant Vault
-    participant App
-    Vault->>App: Old Secret
-    Note over Vault: Rotation Trigger
-    Vault->>App: New Secret
-    App->>Service: Use New Secret
-```
-
----
-
-## 📍 Slide 28 – 🧩 Integrating Vaults with CI/CD Pipelines
-
-* 🚀 CI/CD = Continuous Integration / Continuous Deployment.
-* 🔑 Pipelines need secrets (DB passwords, cloud keys, API tokens).
-* 🛡️ Vault integration injects secrets **dynamically at runtime** instead of storing them in code.
-* ⚙️ Example: GitHub Actions pulling secrets from Vault.
-* 📊 Benefits: reduces leaks, enables rotation, adds audit trails.
-
-```mermaid
-flowchart LR
-    Vault[Secret Vault] -->|Inject Secrets| Pipeline[CI/CD Pipeline]
-    Pipeline --> App[Application Build/Deploy]
-    Pipeline --> Cloud[Cloud Services]
-```
-
----
-
-## 📍 Slide 29 – 🔄 Dynamic vs Static Secrets
-
-* 🧾 **Static secrets**: long-lived, manually managed (e.g., hardcoded API key).
-* ⚡ **Dynamic secrets**: generated on demand, short-lived (e.g., 1-hour DB password).
-* ✅ Dynamic secrets reduce risk: compromised keys expire quickly.
-* 🛠️ Vault tools can auto-generate **ephemeral credentials**.
-* 🌍 Trend: industry moving towards **dynamic-first models**.
-
-```mermaid
-flowchart TD
-    Static[Static Secret] --> Risk[Long-term Exposure Risk]
-    Dynamic[Dynamic Secret] --> Safe[Expires Quickly, Lower Risk]
-```
-
----
-
-## 📍 Slide 30 – 🧹 Cleaning Git History of Secrets
-
-* 🚨 If secrets are leaked in Git, they must be removed from history.
-* 🛠️ Tools: **BFG Repo-Cleaner** (fast, easy) or `git filter-repo` (flexible).
-* 📜 After cleanup, force-push to overwrite history.
-* ⚠️ Risk: breaks clones/forks, requires coordination with collaborators.
-* ✅ Still recommended for compliance even if secret is rotated.
-
-```mermaid
-graph LR
-    Old[Repo with Leaked Secret] --> BFG[BFG Repo-Cleaner]
-    BFG --> Clean[Repo without Secret]
-    Clean --> Push[Force Push to Remote]
-```
-
----
-
-## 📍 Slide 31 – 🚦 Pre-Commit Hooks for Preventing Leaks
-
-* 🛡️ **Pre-commit hooks** run checks before a commit is saved.
-* 🧩 Tools like **Husky** or custom Git hooks can block secrets.
-* ⚙️ Example rule: block commits containing “AWS\_SECRET\_KEY”.
-* 📊 Helps developers catch mistakes early, before they hit Git history.
-* 🎉 Fun fact: Some teams enforce **mandatory pre-commit checks** across all repos.
-
-```mermaid
-flowchart TD
-    Dev[Developer Commit] --> Hook[Pre-Commit Hook]
-    Hook -->|Contains Secret| Block[❌ Block Commit]
-    Hook -->|No Secret| Allow[✔ Commit Allowed]
-```
-
----
-
-## 📍 Slide 32 – 🛠️ Secrets Scanning in CI/CD Pipelines
-
-* 🏗️ Pipelines can run **secret scanners** (Gitleaks, TruffleHog, GitGuardian).
-* 🚨 If a secret is detected, the build/deploy process fails.
-* 🛡️ Ensures no sensitive data reaches production.
-* 📦 Best practice: run scanning on every pull request and branch.
-* 📊 Enterprises combine CI/CD scanning with **centralized monitoring**.
-
-```mermaid
-flowchart LR
-    Dev[Pull Request] --> Pipeline[CI/CD Pipeline]
-    Pipeline --> Scanner[Secret Scanner]
-    Scanner -->|Secret Found| Fail[❌ Build Fails]
-    Scanner -->|No Secret| Deploy[✔ Deploy Continues]
-```
-
----
-## 📍 Slide 33 – 🕸️ Zero-Trust Approach to Git Security
-
-* 🔐 **Zero-Trust** = “Never trust, always verify” principle applied to Git workflows.
-* 🧑‍💻 Every commit, merge, and access request is verified against policies.
-* 🛡️ Requires **signed commits, enforced 2FA, and role-based repo access**.
-* 🌐 Remote access uses VPNs or Zero-Trust Network Access (ZTNA).
-* 📊 Benefit: reduces insider threats and unauthorized code changes.
-* 🎉 Fun fact: Google pioneered the **BeyondCorp** model, inspiring Zero-Trust in DevOps.
-
-```mermaid
-flowchart TD
-    Dev[Developer] -->|Signed Commit| Repo[Repository]
-    Dev -->|Access Request| Gatekeeper[Zero-Trust Policy Check]
-    Gatekeeper -->|Allow| Repo
-    Gatekeeper -->|Deny| Blocked
-```
-
----
-
-## 📍 Slide 34 – 🌐 Emerging Trends: P2P & Blockchain Git
-
-* 🔄 **Peer-to-Peer Git (P2P)** — repos shared directly without central servers.
-* 📦 Example: **Radicle** — decentralized Git collaboration.
-* 🌍 **Blockchain-backed repos** (e.g., Gitopia) ensure tamper-proof history.
-* ⚡ Benefits: resilience, censorship resistance, cryptographic integrity.
-* 🚧 Challenges: slower adoption, tooling still maturing.
-* 🎉 Fun fact: Radicle is described as “GitHub without GitHub.”
-
-```mermaid
-graph TD
-    Dev1[Developer A] <--> Dev2[Developer B]
-    Dev2 <--> Dev3[Developer C]
-    Dev1 <--> Dev3[Decentralized P2P Git Network]
-```
-
----
-
-## 📍 Slide 35 – 🔮 Future of Git Security & Secret Management
-
-* 🚀 Growing adoption of **ephemeral, auto-rotating secrets**.
-* 🛠️ AI-driven scanners that detect secrets more accurately with context.
-* 🕸️ Wider move to **P2P and blockchain-based version control**.
-* 🏢 Enterprises adopting **“security by default”** policies in Git platforms.
-* 🌍 Regulatory compliance (GDPR, NIST, ISO) pushing stricter practices.
-* 🎉 Prediction: within 5–10 years, **manual secret handling will disappear**.
-
-```mermaid
-timeline
-    title Future of Git Security
-    2025 : Widespread Automated Scanning
-    2027 : Ephemeral Secrets Standardized
-    2030 : Blockchain-backed Git Adoption
-```
-
----
-
-## 📍 Slide 36 – 🏢 Case Study: GitHub Token Leaks
-
-* 🚨 In 2021, GitHub reported widespread **token leaks** across public repos.
-* 🛠️ Many tokens were found by **automated scanners**, not by developers.
-* 🏴‍☠️ Attackers exploited leaked tokens to access CI/CD pipelines.
-* 📦 GitHub partnered with providers (AWS, GCP, Slack) to **auto-revoke tokens**.
-* 📊 Lesson: automation is essential — humans can’t keep up with leak frequency.
-
-```mermaid
-graph TD
-    Leak[Leaked Token] --> Attacker[Attacker Exploits Access]
-    Attacker --> Pipelines[CI/CD Pipeline]
-    Pipelines --> Data[System/Data Compromised]
-```
-
----
-
-## 📍 Slide 37 – 🚨 Case Study: Supply-Chain Attacks via Repos
-
-* 🕵️ Attackers compromise repos to insert **malicious code or dependencies**.
-* 🏴‍☠️ Example: **event-stream NPM package** hijack in 2018.
-* 📦 Malicious commits looked legitimate but harvested cryptocurrency wallets.
-* ⚠️ Unsigned commits made it easier to inject code unnoticed.
-* 📊 Lesson: enforce signed commits and review dependencies.
-* 🎉 Fun fact: Supply-chain attacks are among the **fastest-growing cyber threats**.
-
-```mermaid
-flowchart TD
-    Attacker[Attacker] --> Repo[Compromised Repo]
-    Repo --> User[Developers Install Dependency]
-    User --> Exploit[Malicious Code Executes]
-```
-
----
-
-## 📍 Slide 38 – 📘 Industry Standards & Compliance Requirements
-
-* 📜 **ISO 27001**: requires secure handling of credentials and repos.
-* 🏛️ **NIST Guidelines**: recommend strong key management and audit logging.
-* 🛡️ **SOC2 Compliance**: demands evidence of secret management practices.
-* ⚖️ **GDPR & HIPAA**: enforce strict data protection (including access keys).
-* 📊 Enterprises adopt Git security policies to meet compliance.
-* 🎉 Fun fact: some auditors now require **proof of commit signing policies**.
-
-```mermaid
-flowchart LR
-    Standards[Compliance Standards] --> Org[Organizations]
-    Org --> Policies[Signed Commits, Vaulting, Scanning]
-    Policies --> Audit[Auditors Approve]
-```
-
----
-## 📍 Slide 39 – 📝 Best Practices Checklist for Developers
-
-* 🔑 **Always sign commits** (GPG or SSH) to ensure authenticity.
-* 🛡️ **Never hardcode secrets** into code or config files.
-* 📦 Use **environment variables or vaults** for secret storage.
-* 🚦 Add **pre-commit hooks** to block sensitive files (`.env`, keys).
-* 🛠️ Run **secret scanners** locally and in CI/CD pipelines.
-* 🔄 **Rotate secrets** regularly and enforce expiration.
-* 🧑‍🤝‍🧑 Collaborate under **Zero-Trust policies** — every commit verified.
-* 📊 Monitor repos with **automated alerts** for new leaks.
-
-```mermaid
-graph TD
-    Checklist[Secure Git & Secrets Checklist] --> Signed[✔ Signed Commits]
-    Checklist --> NoSecrets[✔ No Secrets in Code]
-    Checklist --> Vaults[✔ Vaults for Storage]
-    Checklist --> Hooks[✔ Pre-Commit Hooks]
-    Checklist --> Scanners[✔ Automated Scanners]
-    Checklist --> Rotation[✔ Secret Rotation]
-```
-
----
-
-## 📍 Slide 40 – 🎯 Summary & Hands-On Practice
-
-* 📖 **Key Takeaways**:
-
-  * Git history is permanent → treat commits as sensitive.
-  * Signed commits build **trust & accountability**.
-  * Secrets must be managed via **vaults, rotation, and scanning**.
-  * Zero-Trust is the **future of Git security**.
-* 🛠️ **Hands-On Practice Ideas**:
-
-  * Generate GPG & SSH keys, sign commits.
-  * Use `gitleaks` to scan your repos.
-  * Configure `.gitignore` and pre-commit hooks.
-  * Deploy HashiCorp Vault and integrate with a pipeline.
-* 📚 **Further Learning**:
-
-  * Git & GitHub official docs
-  * OWASP Secrets Management Guide
-  * DevSecOps playbooks & industry case studies
-* 🎉 Remember: **security is everyone’s job in DevOps!**
-
-```mermaid
-flowchart TD
-    Git[Git Security] --> Commits[Signed Commits]
-    Git --> Secrets[Secrets Management]
-    Git --> Vaults[Vaulting & Rotation]
-    Git --> Scanning[Automated Scanning]
-    Git --> ZeroTrust[Zero-Trust Practices]
-```
-
----
+## 📍 Slide 20 – 📚 Resources & Takeaways
+
+**Books:**
+
+| 📖 Book | ✍️ Why |
+|---|---|
+| *Pro Git* — Scott Chacon & Ben Straub (2nd ed., free PDF) | Chapter 7 covers signing in detail |
+| *Application Security Program Handbook* — Derek Fisher (Manning, 2023) | Chapter 4 on secrets management is the most actionable single chapter |
+| *The DevOps Handbook* — Kim, Humble, Debois, Willis (2nd ed., 2021) | Part IV on technical practices; secrets as a deployment concern |
+
+**Talks & specs:**
+
+* 🎥 *"How GitHub Builds GitHub"* — GitHub engineering, several talks across 2022–2024; signing rollout discussed
+* 🎥 *"Secrets Sprawl: What 23M Secrets Tell Us"* — GitGuardian, AppSec EU 2024
+* 📜 [Gitleaks Rule Reference](https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml)
+* 📜 [GitHub: About commit signature verification](https://docs.github.com/en/authentication/managing-commit-signature-verification)
+* 📜 [git-filter-repo manual](https://htmlpreview.github.io/?https://github.com/newren/git-filter-repo/blob/docs/html/git-filter-repo.html)
+
+**Takeaways:**
+
+| # | 🧠 Insight |
+|---|---|
+| 1 | Signed commits are about **non-repudiation**, not just a green checkmark. The signature is evidence the audit team will ask for. |
+| 2 | SSH signing is the lowest-friction modern approach. GPG remains valid; pick one and standardize. |
+| 3 | Secrets in Git are **forever** — rewriting history is for cleanup; rotation is for actual remediation. |
+| 4 | gitleaks pre-commit + GHSS/TruffleHog in CI = layered defense. Either alone has known gaps. |
+| 5 | The Toyota leak (5 years, 296k records) needed two controls that fit on one page of YAML. Cheap insurance. |
+
+> 💬 *"The price of liberty is eternal vigilance."* — Thomas Jefferson (sort of) — applies to your `git log -p` as much as to anything else.
