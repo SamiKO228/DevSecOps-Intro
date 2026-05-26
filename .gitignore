@@ -1,48 +1,30 @@
-# Instructor-only reference submissions (dry-run outputs)
+# Instructor-only reference submissions (dry-run outputs, never on remote)
 refs/
 
-# Student artifacts — they exist in student forks, not the course repo
-submissions/
-.github/workflows/
-/locustfile.py
+# Private keys — never commit anywhere
+*.key
+!labs/lab9/policies/*.key       # allow if a Rego policy ever ships with a fixture key
 
-# Lab scan/scratch outputs (regenerated per run)
+# Bulk regenerable scratch outputs (per-lab spec says "do not commit").
+# These are large + regenerated each run; not student deliverables.
 labs/lab2/output/
 labs/lab2/output-*/
-labs/lab4/juice-shop.cdx.json
-labs/lab4/juice-shop.spdx.json
-labs/lab4/juice-shop-attestation.json
-labs/lab4/results/
-labs/lab8/keys/
-labs/lab9/falco/rules/custom-rules.yaml
 labs/lab5/results/
-labs/lab5/semgrep/
+labs/lab5/semgrep/juice-shop/
 labs/lab6/results/
 labs/lab7/results/
-labs/lab7/k8s/
-labs/lab8/keys/cosign.key
 labs/lab8/results/
 labs/lab9/falco/logs/
-labs/lab10/work/
+labs/lab10/work/dd/
 labs/lab11/logs/
 labs/lab11/reverse-proxy/certs/
 labs/lab12/results/
-labs/lab2/threagile-model-secure.yaml
-labs/lab2/threagile-model-auth.yaml
 
-# Cosign / TLS private keys — defense in depth
-*.key
-!labs/lab9/policies/*.key       # placeholder; remove if no Rego key files
-
-# Python / Node dev
-.venv/
+# Standard
 __pycache__/
 *.pyc
+*.pyo
 node_modules/
-
-# Editor / OS / Agent config
-.vscode/
-.idea/
-.claude/
+.venv/
 .DS_Store
 *.swp
