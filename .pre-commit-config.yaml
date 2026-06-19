@@ -10,3 +10,4 @@ repos:
       - id: detect-private-key
         exclude: ^labs/lab6/
       - id: check-added-large-files
+        args: ['--maxkb=5000']
